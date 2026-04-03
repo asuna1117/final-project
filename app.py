@@ -30,7 +30,6 @@ def fetch_data_pipeline(stock_list):
 def analyze_data_pipeline(_raw_data_dict, strategy_params):
     all_trades = []
     for sid, df in _raw_data_dict.items():
-        # 🌟 後台強制關閉法人第三層，維持原本最穩定的兩層硬規則
         trades = test.backtest_squeeze_strategy(df, inst_df=None, enable_layer_3=False, **strategy_params)
         if trades:
             all_trades.extend(trades)
@@ -71,8 +70,12 @@ st.sidebar.markdown("---")
 # --- 第二階段參數設定 ---
 st.sidebar.header("⚙️ 階段二：客製化參數設定")
 
+# 新增：大戶級距選擇
+tier_mapping = {">400張": ">400張百分比", ">600張": ">600張百分比", ">800張": ">800張百分比", ">1000張": ">1000張百分比"}
+selected_tier_label = st.sidebar.selectbox("🎯 大戶定義門檻", options=list(tier_mapping.keys()), index=0)
+tier_val = tier_mapping[selected_tier_label]
+
 c_weeks = st.sidebar.number_input("連續買超週數", min_value=2, max_value=12, value=4)
-# 🌟 把上一版誤刪的「大戶增長率」加回來了！
 min_g = st.sidebar.number_input("大戶每週最低增長率 (%)", min_value=0.0, max_value=5.0, value=0.1, step=0.1)
 pop_d = st.sidebar.number_input("散戶減少最低門檻 (%)", min_value=0.0, max_value=10.0, value=0.5, step=0.1)
 
@@ -82,18 +85,15 @@ l_corr = st.sidebar.slider("大戶相關係數門檻", min_value=0.0, max_value=
 r_corr = st.sidebar.slider("散戶相關係數門檻", min_value=-1.0, max_value=0.0, value=-0.6, step=0.05)
 a_corr = st.sidebar.slider("平均張數相關係數門檻", min_value=0.0, max_value=1.0, value=0.6, step=0.05)
 
-# 🌟 已經將「法人過濾設定」的 UI 徹底刪除，維持介面清爽
-
 strategy_params = {
+    'large_holder_tier': tier_val,
     'continuous_weeks': c_weeks,
     'min_growth': min_g,
     'pop_decline_threshold': pop_d,
     'corr_window': c_win,
     'large_corr_thresh': l_corr,
     'retail_corr_thresh': r_corr,
-    'avg_corr_thresh': a_corr,
-    # 法人參數直接在背景鎖定 0.5%，未來要改再從這裡呼叫
-    'inst_buy_thresh': 0.5 
+    'avg_corr_thresh': a_corr
 }
 
 st.sidebar.markdown("---")
