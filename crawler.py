@@ -48,6 +48,55 @@ def get_next_monday_open_price(stock_id, signal_date):
         return np.nan
     except Exception:
         return np.nan
+    
+def check_condition_e_with_yfinance(stock_id, signal_date, monday_open_price):
+    """條件 E: 下週二收盤 > 週一開盤，且週三、週四收盤連續走高。"""
+    try:
+        signal_dt = datetime.strptime(str(signal_date), "%Y%m%d")
+    except ValueError:
+        return False
+
+    days_until_monday = (7 - signal_dt.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 7
+
+    next_monday = signal_dt + timedelta(days=days_until_monday)
+    next_tuesday = next_monday + timedelta(days=1)
+    next_wednesday = next_monday + timedelta(days=2)
+    next_thursday = next_monday + timedelta(days=3)
+    expected_dates = [next_tuesday.date(), next_wednesday.date(), next_thursday.date()]
+
+    for suffix in [".TW", ".TWO"]:
+        ticker = f"{stock_id}{suffix}"
+        data = yf.download(
+            ticker,
+            start=next_tuesday.strftime("%Y-%m-%d"),
+            end=(next_thursday + timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+
+        if data is None or data.empty:
+            continue
+
+        close_series = data["Close"]
+        if isinstance(close_series, pd.DataFrame):
+            close_series = close_series.iloc[:, 0]
+        close_series = close_series.dropna()
+
+        daily_close = {pd.Timestamp(idx).date(): float(val) for idx, val in close_series.items()}
+        if not all(day in daily_close for day in expected_dates):
+            continue
+
+        tue_close = daily_close[expected_dates[0]]
+        wed_close = daily_close[expected_dates[1]]
+        thu_close = daily_close[expected_dates[2]]
+
+        return tue_close > monday_open_price and wed_close > tue_close and thu_close > wed_close
+
+    return False
 
 # ==========================================
 # 爬蟲引擎 (含 12 小時智慧快取)

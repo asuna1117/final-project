@@ -1,12 +1,17 @@
 import pandas as pd
 import numpy as np
+import yfinance as yf
+from datetime import datetime, timedelta
 from tabulate import tabulate
 import crawler # 🌟 引入剛剛建好的爬蟲模組
+
+
+
 
 # ==========================================
 # 核心功能：回測邏輯 (相關係數升級為動態 3 年/156週)
 # ==========================================
-def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.5, pop_decline_threshold=0.5,
+def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_threshold=0.5,
                               corr_window=156, large_corr_thresh=0.6, 
                               retail_corr_thresh=-0.6, avg_corr_thresh=0.6): 
     
@@ -19,17 +24,21 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.5, pop_
     if len(df) < continuous_weeks + 1: return []
     
     for i in range(continuous_weeks, len(df)-1):
-        
+
+        # 條件 A: 連續 4 週每週漲幅皆 > 0.1%
         weekly_growth_a = [((df.at[i-j, large_holder_col] - df.at[i-j-1, large_holder_col]) / df.at[i-j-1, large_holder_col]) * 100 if df.at[i-j-1, large_holder_col] > 0 else -np.inf for j in range(continuous_weeks)]
         is_continuous_buy = all(g > min_growth for g in weekly_growth_a)
         
+        # 條件 B: 平均張數/人連續 4 週每週漲幅皆 > 0.1%
         weekly_growth_b = [((df.at[i-j, '平均張數/人'] - df.at[i-j-1, '平均張數/人']) / df.at[i-j-1, '平均張數/人']) * 100 if df.at[i-j-1, '平均張數/人'] > 0 else -np.inf for j in range(continuous_weeks)]
         is_avg_per_person_continuous_up = all(g > min_growth for g in weekly_growth_b)
         
+        # 條件 C: 總股東人數 4 週總下跌 > 0.5%
         pop_decline_pct = ((df.at[i-continuous_weeks, '總股東人數'] - df.at[i, '總股東人數']) / df.at[i-continuous_weeks, '總股東人數']) * 100
 
         if is_continuous_buy and is_avg_per_person_continuous_up and pop_decline_pct > pop_decline_threshold:
             
+            # 計算 156 週特徵與下週收盤價的相關係數
             actual_window = min(corr_window, i + 1)
             
             x_large = df.loc[i-actual_window+1:i, large_holder_col].reset_index(drop=True)
@@ -45,12 +54,17 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.5, pop_
             avg_corr_val = 0.0 if pd.isna(avg_corr_val) else avg_corr_val
             retail_corr_val = 0.0 if pd.isna(retail_corr_val) else retail_corr_val
 
+            # 條件 D: 相關係數門檻
             if not (corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh):
                 continue
 
             # 🌟 呼叫 crawler 裡的抓股價功能
             buy_price = crawler.get_next_monday_open_price(stock_id, df.at[i, '資料日期'])
             sell_price = df.at[i+1, '收盤價'] 
+
+            # 條件 E: 檢查下週二到下週四收盤價連續走高
+            if buy_price <= 0 or not crawler.check_condition_e_with_yfinance(stock_id, df.at[i, '資料日期'], buy_price):
+                continue
             
             if buy_price > 0:
                 profit_pct = ((sell_price - buy_price) / buy_price) * 100
