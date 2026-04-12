@@ -9,7 +9,7 @@ import crawler # 🌟 引入剛剛建好的爬蟲模組
 
 
 # ==========================================
-# 核心功能：回測邏輯 (相關係數升級為動態 3 年/156週)
+# 核心功能：回測邏輯 (相關係數使用進場日前全部週次)
 # ==========================================
 def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_threshold=0.5,
                               corr_window=156, large_corr_thresh=0.6, 
@@ -37,14 +37,16 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
         pop_decline_pct = ((df.at[i-continuous_weeks, '總股東人數'] - df.at[i, '總股東人數']) / df.at[i-continuous_weeks, '總股東人數']) * 100
 
         if is_continuous_buy and is_avg_per_person_continuous_up and pop_decline_pct > pop_decline_threshold:
-            
-            # 計算 156 週特徵與下週收盤價的相關係數
-            actual_window = min(corr_window, i + 1)
-            
-            x_large = df.loc[i-actual_window+1:i, large_holder_col].reset_index(drop=True)
-            x_avg_per_person = df.loc[i-actual_window+1:i, '平均張數/人'].reset_index(drop=True)
-            x_shareholders = df.loc[i-actual_window+1:i, '總股東人數'].reset_index(drop=True)
-            y_next_close = df.loc[i-actual_window+2:i+1, '收盤價'].reset_index(drop=True)
+
+            # 計算進場日前全部週次特徵與下一週收盤價的相關係數
+            # 使用配對 (X_t, Y_{t+1})，僅用到進場公告日前資料。
+            if i < 1:
+                continue
+
+            x_large = df.loc[0:i-1, large_holder_col].reset_index(drop=True)
+            x_avg_per_person = df.loc[0:i-1, '平均張數/人'].reset_index(drop=True)
+            x_shareholders = df.loc[0:i-1, '總股東人數'].reset_index(drop=True)
+            y_next_close = df.loc[1:i, '收盤價'].reset_index(drop=True)
 
             corr_val = x_large.corr(y_next_close)
             avg_corr_val = x_avg_per_person.corr(y_next_close)
@@ -71,15 +73,58 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
                 trades.append({
                     '代號': stock_id,
                     '進場日期(籌碼公告)': df.at[i, '資料日期'],
-                    f'大戶相關係數({actual_window}週)': round(float(corr_val), 3),
-                    f'散戶相關係數({actual_window}週)': round(float(retail_corr_val), 3),
-                    f'平均張數相關({actual_window}週)': round(float(avg_corr_val), 3),
+                    '大戶相關係數': round(float(corr_val), 3),
+                    '散戶相關係數': round(float(retail_corr_val), 3),
+                    '平均張數相關': round(float(avg_corr_val), 3),
                     '週一開盤進場價': round(buy_price, 2),
                     '下週收盤出場價': round(sell_price, 2) if sell_price else None,
                     '週報酬%': profit_pct
                 })
 
     return trades
+
+
+def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_threshold=0.5,
+                      corr_window=156, large_corr_thresh=0.6,
+                      retail_corr_thresh=-0.6, avg_corr_thresh=0.6):
+    """檢查是否曾出現符合 A~D 的任一訊號，作為是否進入 Yahoo 抓價流程的預篩。"""
+    df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
+    large_holder_col = '>400張百分比'
+
+    if len(df) < continuous_weeks + 2:
+        return False
+
+    for i in range(continuous_weeks, len(df) - 1):
+        weekly_growth_a = [((df.at[i-j, large_holder_col] - df.at[i-j-1, large_holder_col]) / df.at[i-j-1, large_holder_col]) * 100 if df.at[i-j-1, large_holder_col] > 0 else -np.inf for j in range(continuous_weeks)]
+        is_continuous_buy = all(g > min_growth for g in weekly_growth_a)
+
+        weekly_growth_b = [((df.at[i-j, '平均張數/人'] - df.at[i-j-1, '平均張數/人']) / df.at[i-j-1, '平均張數/人']) * 100 if df.at[i-j-1, '平均張數/人'] > 0 else -np.inf for j in range(continuous_weeks)]
+        is_avg_per_person_continuous_up = all(g > min_growth for g in weekly_growth_b)
+
+        pop_decline_pct = ((df.at[i-continuous_weeks, '總股東人數'] - df.at[i, '總股東人數']) / df.at[i-continuous_weeks, '總股東人數']) * 100
+        if not (is_continuous_buy and is_avg_per_person_continuous_up and pop_decline_pct > pop_decline_threshold):
+            continue
+
+        if i < 1:
+            continue
+
+        x_large = df.loc[0:i-1, large_holder_col].reset_index(drop=True)
+        x_avg_per_person = df.loc[0:i-1, '平均張數/人'].reset_index(drop=True)
+        x_shareholders = df.loc[0:i-1, '總股東人數'].reset_index(drop=True)
+        y_next_close = df.loc[1:i, '收盤價'].reset_index(drop=True)
+
+        corr_val = x_large.corr(y_next_close)
+        avg_corr_val = x_avg_per_person.corr(y_next_close)
+        retail_corr_val = x_shareholders.corr(y_next_close)
+
+        corr_val = 0.0 if pd.isna(corr_val) else corr_val
+        avg_corr_val = 0.0 if pd.isna(avg_corr_val) else avg_corr_val
+        retail_corr_val = 0.0 if pd.isna(retail_corr_val) else retail_corr_val
+
+        if corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh:
+            return True
+
+    return False
 
 # ==========================================
 # 回測總司令函式
@@ -96,6 +141,11 @@ def run_all_analysis(target_list):
         df = crawler.get_individual_stock_data(sid)
         if df is None or df.empty:
             print("Skip (無籌碼資料)")
+            continue
+
+        # 只對曾經觸發 A~D 的股票進行後續 Yahoo 抓價與回測
+        if not has_any_ad_signal(df):
+            print("Skip (未觸發A~D)")
             continue
 
         all_dfs.append(df)

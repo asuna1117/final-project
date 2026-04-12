@@ -4,6 +4,8 @@ import time
 import re
 import numpy as np
 import yfinance as yf
+import io
+import contextlib
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import os
@@ -23,6 +25,12 @@ DATA_DIR = os.path.join(BASE_DIR, "stock_data_cache")
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
+
+def _quiet_yf_download(*args, **kwargs):
+    """Silence yfinance console noise and return dataframe as-is."""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return yf.download(*args, **kwargs)
+
 # ==========================================
 # 股價與爬蟲輔助功能
 # ==========================================
@@ -37,7 +45,7 @@ def get_next_monday_open_price(stock_id, signal_date):
 
         for suffix in [".TW", ".TWO"]:
             ticker = f"{stock_id}{suffix}"
-            data = yf.download(ticker, start=next_monday.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="1d", progress=False, auto_adjust=False, threads=False)
+            data = _quiet_yf_download(ticker, start=next_monday.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="1d", progress=False, auto_adjust=False, threads=False)
             if data is None or data.empty: continue
             
             open_series = data["Open"]
@@ -68,7 +76,7 @@ def check_condition_e_with_yfinance(stock_id, signal_date, monday_open_price):
 
     for suffix in [".TW", ".TWO"]:
         ticker = f"{stock_id}{suffix}"
-        data = yf.download(
+        data = _quiet_yf_download(
             ticker,
             start=next_tuesday.strftime("%Y-%m-%d"),
             end=(next_thursday + timedelta(days=1)).strftime("%Y-%m-%d"),
