@@ -143,9 +143,11 @@ def get_individual_stock_data(stock_id, force_update=False):
     if not force_update and os.path.exists(file_path):
         try:
             df = pd.read_csv(file_path)
-            df['股票代號'] = df['股票代號'].astype(str).str.zfill(4)
-            df['資料日期'] = df['資料日期'].astype(str)
-            return df
+            if '>1000張百分比' in df.columns:
+                df['股票代號'] = df['股票代號'].astype(str).str.zfill(4)
+                df['資料日期'] = df['資料日期'].astype(str)
+                return df
+            force_update = True
         except: pass
 
     url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
@@ -160,14 +162,14 @@ def get_individual_stock_data(stock_id, force_update=False):
                 try:
                     row = {
                         '資料日期': numbers[0], '總張數' : numbers[1], '總股東人數': numbers[2], 
-                        '平均張數/人': numbers[3], '>400張百分比': numbers[5], '收盤價': numbers[12]
+                        '平均張數/人': numbers[3], '>1000張百分比': numbers[4], '>400張百分比': numbers[5], '收盤價': numbers[12]
                     }
                     if 0 < float(row['收盤價']) < 100000: data_rows.append(row)
                 except: continue
         
         if not data_rows: return None
         df = pd.DataFrame(data_rows).drop_duplicates(subset=['資料日期'])
-        for col in ['總張數','總股東人數', '平均張數/人', '>400張百分比', '收盤價']: 
+        for col in ['總張數','總股東人數', '平均張數/人', '>1000張百分比', '>400張百分比', '收盤價']: 
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df = df.dropna()
         df.insert(0, '股票代號', str(stock_id).zfill(4))

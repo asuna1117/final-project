@@ -7,6 +7,21 @@ import crawler # 🌟 引入剛剛建好的爬蟲模組
 
 
 
+def _get_large_holder_series(df):
+    """依該列收盤價動態決定使用 >400 或 >1000 張百分比。"""
+    if '>400張百分比' not in df.columns:
+        return pd.Series(index=df.index, dtype=float)
+
+    if '>1000張百分比' not in df.columns:
+        return pd.to_numeric(df['>400張百分比'], errors='coerce')
+
+    close_price = pd.to_numeric(df['收盤價'], errors='coerce')
+    large_400 = pd.to_numeric(df['>400張百分比'], errors='coerce')
+    large_1000 = pd.to_numeric(df['>1000張百分比'], errors='coerce')
+
+    return pd.Series(np.where(close_price > 100, large_400, large_1000), index=df.index)
+
+
 
 # ==========================================
 # 核心功能：回測邏輯 (相關係數使用進場日前全部週次)
@@ -19,14 +34,14 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
     df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
     trades = []
     
-    large_holder_col = '>400張百分比'
+    large_holder_series = _get_large_holder_series(df)
     
     if len(df) < continuous_weeks + 1: return []
     
     for i in range(continuous_weeks, len(df)-1):
 
         # 條件 A: 連續 4 週每週漲幅皆 > 0.1%
-        weekly_growth_a = [((df.at[i-j, large_holder_col] - df.at[i-j-1, large_holder_col]) / df.at[i-j-1, large_holder_col]) * 100 if df.at[i-j-1, large_holder_col] > 0 else -np.inf for j in range(continuous_weeks)]
+        weekly_growth_a = [((large_holder_series.iat[i-j] - large_holder_series.iat[i-j-1]) / large_holder_series.iat[i-j-1]) * 100 if large_holder_series.iat[i-j-1] > 0 else -np.inf for j in range(continuous_weeks)]
         is_continuous_buy = all(g > min_growth for g in weekly_growth_a)
         
         # 條件 B: 平均張數/人連續 4 週每週漲幅皆 > 0.1%
@@ -43,7 +58,7 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
             if i < 1:
                 continue
 
-            x_large = df.loc[0:i-1, large_holder_col].reset_index(drop=True)
+            x_large = large_holder_series.iloc[0:i].reset_index(drop=True)
             x_avg_per_person = df.loc[0:i-1, '平均張數/人'].reset_index(drop=True)
             x_shareholders = df.loc[0:i-1, '總股東人數'].reset_index(drop=True)
             y_next_close = df.loc[1:i, '收盤價'].reset_index(drop=True)
@@ -89,13 +104,13 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_
                       retail_corr_thresh=-0.6, avg_corr_thresh=0.6):
     """檢查是否曾出現符合 A~D 的任一訊號，作為是否進入 Yahoo 抓價流程的預篩。"""
     df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
-    large_holder_col = '>400張百分比'
+    large_holder_series = _get_large_holder_series(df)
 
     if len(df) < continuous_weeks + 2:
         return False
 
     for i in range(continuous_weeks, len(df) - 1):
-        weekly_growth_a = [((df.at[i-j, large_holder_col] - df.at[i-j-1, large_holder_col]) / df.at[i-j-1, large_holder_col]) * 100 if df.at[i-j-1, large_holder_col] > 0 else -np.inf for j in range(continuous_weeks)]
+        weekly_growth_a = [((large_holder_series.iat[i-j] - large_holder_series.iat[i-j-1]) / large_holder_series.iat[i-j-1]) * 100 if large_holder_series.iat[i-j-1] > 0 else -np.inf for j in range(continuous_weeks)]
         is_continuous_buy = all(g > min_growth for g in weekly_growth_a)
 
         weekly_growth_b = [((df.at[i-j, '平均張數/人'] - df.at[i-j-1, '平均張數/人']) / df.at[i-j-1, '平均張數/人']) * 100 if df.at[i-j-1, '平均張數/人'] > 0 else -np.inf for j in range(continuous_weeks)]
@@ -108,7 +123,7 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_
         if i < 1:
             continue
 
-        x_large = df.loc[0:i-1, large_holder_col].reset_index(drop=True)
+        x_large = large_holder_series.iloc[0:i].reset_index(drop=True)
         x_avg_per_person = df.loc[0:i-1, '平均張數/人'].reset_index(drop=True)
         x_shareholders = df.loc[0:i-1, '總股東人數'].reset_index(drop=True)
         y_next_close = df.loc[1:i, '收盤價'].reset_index(drop=True)
