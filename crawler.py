@@ -34,31 +34,115 @@ def _quiet_yf_download(*args, **kwargs):
 # ==========================================
 # 股價與爬蟲輔助功能
 # ==========================================
+def download_stock_price_history(stock_id, force_update=False):
+    """下載單一股票 3 年歷史價格數據並存成 CSV (快取 12 小時)"""
+    price_file = os.path.join(DATA_DIR, f"{stock_id}_price_history.csv")
+    
+    # 檢查快取是否有效
+    if os.path.exists(price_file):
+        file_age = time.time() - os.path.getmtime(price_file)
+        if file_age <= 43200 and not force_update:
+            try:
+                df = pd.read_csv(price_file, index_col='Date', parse_dates=True)
+                if not df.empty:
+                    return df
+            except:
+                pass
+    
+    # 計算 3 年前的日期
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365*3)
+    
+    # 嘗試兩種股票代碼後綴
+    for suffix in [".TW", ".TWO"]:
+        ticker = f"{stock_id}{suffix}"
+        try:
+            print(f"  ↓ 下載 {ticker} 價格歷史...", end=" ", flush=True)
+            data = _quiet_yf_download(
+                ticker,
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                threads=False
+            )
+            
+            if data is not None and not data.empty:
+                # 保留必要欄位
+                data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                data.index.name = 'Date'
+                data.to_csv(price_file, encoding='utf-8-sig')
+                print(f"✓ 成功({len(data)}筆)")
+                return data
+        except Exception as e:
+            print(f"✗ 失敗")
+            continue
+    
+    print(f"✗ 無法取得")
+    return None
+
 def get_next_monday_open_price(stock_id, signal_date):
-    """計算並抓取下週一的開盤價"""
+    """計算並從本地價格歷史取得下週一的開盤價"""
     try:
         signal_dt = datetime.strptime(str(signal_date), "%Y%m%d")
         days_until_monday = (7 - signal_dt.weekday()) % 7
         if days_until_monday == 0: days_until_monday = 7
         next_monday = signal_dt + timedelta(days=days_until_monday)
-        end_dt = next_monday + timedelta(days=14)
 
-        for suffix in [".TW", ".TWO"]:
-            ticker = f"{stock_id}{suffix}"
-            data = _quiet_yf_download(ticker, start=next_monday.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="1d", progress=False, auto_adjust=False, threads=False)
-            if data is None or data.empty: continue
+        # 先確保有下載該股票的價格歷史
+        price_df = download_stock_price_history(stock_id)
+        if price_df is None or price_df.empty:
+            return np.nan
+        
+        # 從 DataFrame 中查找下週一的開盤價
+        next_monday_str = next_monday.strftime("%Y-%m-%d")
+        if next_monday_str in price_df.index.strftime("%Y-%m-%d").values:
+            idx = price_df.index.strftime("%Y-%m-%d") == next_monday_str
+            if idx.any():
+                return float(price_df.loc[idx, 'Open'].iloc[0])
+        
+        return np.nan
+    except Exception:
+        return np.nan
+
+def get_next_friday_close_price(stock_id, signal_date):
+    """計算並從本地價格歷史取得下週五的收盤價，若無則往前查找最近交易日"""
+    try:
+        signal_dt = datetime.strptime(str(signal_date), "%Y%m%d")
+        days_until_monday = (7 - signal_dt.weekday()) % 7
+        if days_until_monday == 0: days_until_monday = 7
+        next_monday = signal_dt + timedelta(days=days_until_monday)
+        next_friday = next_monday + timedelta(days=4)
+
+        # 先確保有下載該股票的價格歷史
+        price_df = download_stock_price_history(stock_id)
+        if price_df is None or price_df.empty:
+            return np.nan
+        
+        # 先嘗試找下週五，若無則往前查找最多 5 個交易日
+        # 但不能往前查超過進場日期 (signal_dt)
+        for days_back in range(0, 5):
+            target_date = next_friday - timedelta(days=days_back)
+
+            # 若查到的日期早於進場日期，停止往前查找
+            if target_date < signal_dt:
+                break
+
+            target_date_str = target_date.strftime("%Y-%m-%d")
             
-            open_series = data["Open"]
-            if isinstance(open_series, pd.DataFrame): open_series = open_series.iloc[:, 0]
-            open_series = open_series.dropna()
+            date_strs = price_df.index.strftime("%Y-%m-%d").values
+            if target_date_str in date_strs:
+                idx = price_df.index.strftime("%Y-%m-%d") == target_date_str
+                if idx.any():
+                    return float(price_df.loc[idx, 'Close'].iloc[0])
 
-            if not open_series.empty: return float(open_series.iloc[0])
         return np.nan
     except Exception:
         return np.nan
     
 def check_condition_e_with_yfinance(stock_id, signal_date, monday_open_price):
-    """條件 E: 下週二收盤 > 週一開盤，且週三、週四收盤連續走高。"""
+    """條件 E: 從本地價格歷史檢查下週二收盤 > 週一開盤，且週三、週四收盤連續走高。若無則往前查找最近交易日，但不超過進場日期。"""
     try:
         signal_dt = datetime.strptime(str(signal_date), "%Y%m%d")
     except ValueError:
@@ -72,39 +156,42 @@ def check_condition_e_with_yfinance(stock_id, signal_date, monday_open_price):
     next_tuesday = next_monday + timedelta(days=1)
     next_wednesday = next_monday + timedelta(days=2)
     next_thursday = next_monday + timedelta(days=3)
-    expected_dates = [next_tuesday.date(), next_wednesday.date(), next_thursday.date()]
+    target_dates = [next_tuesday, next_wednesday, next_thursday]
 
-    for suffix in [".TW", ".TWO"]:
-        ticker = f"{stock_id}{suffix}"
-        data = _quiet_yf_download(
-            ticker,
-            start=next_tuesday.strftime("%Y-%m-%d"),
-            end=(next_thursday + timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval="1d",
-            progress=False,
-            auto_adjust=False,
-            threads=False,
-        )
+    # 先確保有下載該股票的價格歷史
+    price_df = download_stock_price_history(stock_id)
+    if price_df is None or price_df.empty:
+        return False
+    
+    # 轉換索引為日期字符串便於查詢
+    price_df['Date_str'] = price_df.index.strftime("%Y-%m-%d")
+    
+    # 為每個目標日期查找收盤價（往前查找最多 5 天），但不能查到進場日前的價格
+    closes = []
+    for target_date in target_dates:
+        found = False
+        for days_back in range(0, 5):
+            search_date = target_date - timedelta(days=days_back)
 
-        if data is None or data.empty:
-            continue
+            # 不允許查到進場日期之前的價格
+            if search_date < signal_dt:
+                break
 
-        close_series = data["Close"]
-        if isinstance(close_series, pd.DataFrame):
-            close_series = close_series.iloc[:, 0]
-        close_series = close_series.dropna()
-
-        daily_close = {pd.Timestamp(idx).date(): float(val) for idx, val in close_series.items()}
-        if not all(day in daily_close for day in expected_dates):
-            continue
-
-        tue_close = daily_close[expected_dates[0]]
-        wed_close = daily_close[expected_dates[1]]
-        thu_close = daily_close[expected_dates[2]]
-
-        return tue_close > monday_open_price and wed_close > tue_close and thu_close > wed_close
-
-    return False
+            search_date_str = search_date.strftime("%Y-%m-%d")
+            
+            if search_date_str in price_df['Date_str'].values:
+                close_price = float(price_df[price_df['Date_str'] == search_date_str]['Close'].iloc[0])
+                closes.append(close_price)
+                found = True
+                break
+        
+        if not found:
+            return False  # 如果某一天怎麼都找不到，就視為條件不成立
+    
+    tue_close, wed_close, thu_close = closes
+    
+    # 條件 E: 下週二收盤 > 週一開盤，且週三、週四收盤連續走高
+    return tue_close > monday_open_price and wed_close > tue_close and thu_close > wed_close
 
 # ==========================================
 # 爬蟲引擎 (含 12 小時智慧快取)

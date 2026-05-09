@@ -77,13 +77,13 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
 
             # 🌟 呼叫 crawler 裡的抓股價功能
             buy_price = crawler.get_next_monday_open_price(stock_id, df.at[i, '資料日期'])
-            sell_price = df.at[i+1, '收盤價'] 
+            sell_price = crawler.get_next_friday_close_price(stock_id, df.at[i, '資料日期'])
 
             # 條件 E: 檢查下週二到下週四收盤價連續走高
-            if buy_price <= 0 or not crawler.check_condition_e_with_yfinance(stock_id, df.at[i, '資料日期'], buy_price):
+            if buy_price <= 0 or pd.isna(sell_price) or not crawler.check_condition_e_with_yfinance(stock_id, df.at[i, '資料日期'], buy_price):
                 continue
             
-            if buy_price > 0:
+            if buy_price > 0 and not pd.isna(sell_price):
                 profit_pct = ((sell_price - buy_price) / buy_price) * 100
                 trades.append({
                     '代號': stock_id,
@@ -92,7 +92,7 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
                     '散戶相關係數': round(float(retail_corr_val), 3),
                     '平均張數相關': round(float(avg_corr_val), 3),
                     '週一開盤進場價': round(buy_price, 2),
-                    '下週收盤出場價': round(sell_price, 2) if sell_price else None,
+                    '下週收盤出場價': round(sell_price, 2),
                     '週報酬%': profit_pct
                 })
 
@@ -158,6 +158,12 @@ def run_all_analysis(target_list):
             print("Skip (無籌碼資料)")
             continue
 
+        # 🌟 先下載該股票 3 年價格歷史 (快取 12 小時)
+        price_data = crawler.download_stock_price_history(sid)
+        if price_data is None or price_data.empty:
+            print("Skip (無價格數據)")
+            continue
+
         # 只對曾經觸發 A~D 的股票進行後續 Yahoo 抓價與回測
         if not has_any_ad_signal(df):
             print("Skip (未觸發A~D)")
@@ -215,11 +221,10 @@ if __name__ == "__main__":
     trades_df = run_all_analysis(target_list)
 
     if not trades_df.empty:
-        display_df = trades_df.fillna({'下週收盤出場價': '等待開獎', '週報酬%': '等待開獎'})
         print("\n" + "=" * 90)
         print("📈 籌碼策略回測結果 (模組化升級版)")
         print("=" * 90)
-        print(tabulate(display_df, headers='keys', tablefmt='simple', showindex=False))
+        print(tabulate(trades_df, headers='keys', tablefmt='simple', showindex=False))
         
         completed_trades = trades_df.dropna(subset=['週報酬%'])
         if not completed_trades.empty:
