@@ -69,6 +69,9 @@ def download_stock_price_history(stock_id, force_update=False):
             )
             
             if data is not None and not data.empty:
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                    
                 # 保留必要欄位
                 data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
                 data.index.name = 'Date'
