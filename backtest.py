@@ -26,7 +26,7 @@ def _get_large_holder_series(df):
 # ==========================================
 # 核心功能：回測邏輯 (相關係數使用進場日前全部週次)
 # ==========================================
-def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_threshold=0.5,
+def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, last_week_threshold=0.179, pop_decline_threshold=0.198,
                               corr_window=156, large_corr_thresh=0.6, 
                               retail_corr_thresh=-0.6, avg_corr_thresh=0.6): 
     
@@ -40,9 +40,9 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
     
     for i in range(continuous_weeks, len(df)-1):
 
-        # 條件 A: 連續 4 週每週漲幅皆 > 0.1%
+        # 條件 A: 連續 4 週每週漲幅皆 > 0，且最後一週 > last_week_threshold
         weekly_growth_a = [((large_holder_series.iat[i-j] - large_holder_series.iat[i-j-1]) / large_holder_series.iat[i-j-1]) * 100 if large_holder_series.iat[i-j-1] > 0 else -np.inf for j in range(continuous_weeks)]
-        is_continuous_buy = all(g > min_growth for g in weekly_growth_a)
+        is_continuous_buy = all(g > 0 for g in weekly_growth_a) and (weekly_growth_a[0] > last_week_threshold)
         
         # 條件 B: 平均張數/人連續 4 週每週漲幅皆 > 0.1%
         weekly_growth_b = [((df.at[i-j, '平均張數/人'] - df.at[i-j-1, '平均張數/人']) / df.at[i-j-1, '平均張數/人']) * 100 if df.at[i-j-1, '平均張數/人'] > 0 else -np.inf for j in range(continuous_weeks)]
@@ -99,7 +99,7 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=4, min_growth=0.1, pop_
     return trades
 
 
-def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_threshold=0.5,
+def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, last_week_threshold=2.0, pop_decline_threshold=0.5,
                       corr_window=156, large_corr_thresh=0.6,
                       retail_corr_thresh=-0.6, avg_corr_thresh=0.6):
     """檢查是否曾出現符合 A~D 的任一訊號，作為是否進入 Yahoo 抓價流程的預篩。"""
@@ -111,7 +111,7 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_
 
     for i in range(continuous_weeks, len(df) - 1):
         weekly_growth_a = [((large_holder_series.iat[i-j] - large_holder_series.iat[i-j-1]) / large_holder_series.iat[i-j-1]) * 100 if large_holder_series.iat[i-j-1] > 0 else -np.inf for j in range(continuous_weeks)]
-        is_continuous_buy = all(g > min_growth for g in weekly_growth_a)
+        is_continuous_buy = all(g > 0 for g in weekly_growth_a) and (weekly_growth_a[0] > last_week_threshold)
 
         weekly_growth_b = [((df.at[i-j, '平均張數/人'] - df.at[i-j-1, '平均張數/人']) / df.at[i-j-1, '平均張數/人']) * 100 if df.at[i-j-1, '平均張數/人'] > 0 else -np.inf for j in range(continuous_weeks)]
         is_avg_per_person_continuous_up = all(g > min_growth for g in weekly_growth_b)
@@ -140,6 +140,7 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, pop_decline_
             return True
 
     return False
+
 
 # ==========================================
 # 回測總司令函式
