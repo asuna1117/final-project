@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import random
 import math
+import time
+from tqdm import tqdm
 import crawler
 import matplotlib.pyplot as plt
 import json
@@ -15,13 +17,47 @@ from backtest import backtest_squeeze_strategy, has_any_ad_signal
 MEMORY_CACHE = {}
 RECORD_FILE = 'best_params.json'
 
+# ==========================================
+# 🌟 效能極速優化區：動態攔截股價硬碟讀取 (Monkey Patching)
+# ==========================================
+PRICE_CACHE = {}  
+
+original_download = crawler.download_stock_price_history
+
+def fast_cached_download(stock_id, force_update=False):
+    if stock_id not in PRICE_CACHE:
+        PRICE_CACHE[stock_id] = original_download(stock_id, force_update)
+    return PRICE_CACHE[stock_id]
+
+crawler.download_stock_price_history = fast_cached_download
+# ==========================================
+
 def preload_data(target_list):
-    print(f"正在將 {len(target_list)} 檔股票資料載入記憶體中...")
+    print(f"正在將 {len(target_list)} 檔股票資料載入記憶體中（同步進行股價預載與黑名單過濾）...")
+    valid_targets = []
+    
     for sid in target_list:
         if sid not in MEMORY_CACHE:
+            # 1. 抓取籌碼資料
             df = crawler.get_individual_stock_data(sid)
+            if df is None or df.empty:
+                continue
+            
+            # 2. 🌟 關鍵過濾：直接預先呼叫 yfinance 抓價格
+            # 只要抓不到（例如 3682、2888 下市或報錯），這檔股票就直接被丟掉，不會進入有效清單！
+            price_df = crawler.download_stock_price_history(sid)
+            if price_df is None or price_df.empty:
+                print(f"  ⚠️ 排除無效或下市標的: {sid}")
+                continue
+                
             MEMORY_CACHE[sid] = df
-    print("資料載入完成！開始執行基因演算法...\n")
+            
+        valid_targets.append(sid)
+        
+    print(f"資料載入完成！剔除下市股後，有效考題共 {len(valid_targets)} 檔。開始執行基因演算法...\n")
+    
+    # 回傳這份「絕對乾淨」的清單給主程式
+    return valid_targets
 
 def load_historical_best():
     if os.path.exists(RECORD_FILE):
@@ -84,7 +120,7 @@ def run_genetic_algorithm(target_list, generations=15, population_size=40, sampl
 
     # 放寬參數邊界，避免第一代找不到任何訊號
     param_bounds = {
-        'continuous_weeks': (2, 8),
+        'continuous_weeks': (3, 8),
         'min_growth': (0.0, 0.8),
         'last_week_threshold': (0.0, 8.0),
         'pop_decline_threshold': (0.1, 5.0)
@@ -103,10 +139,12 @@ def run_genetic_algorithm(target_list, generations=15, population_size=40, sampl
     history_avg = []
 
     for gen in range(generations):
+        gen_start_time = time.time() # 🌟 1. 碼錶按下去：記錄這一代開始的時間
+
         print(f"GA 世代 {gen+1}/{generations} - 正在評估 {len(population)} 個個體...")
 
         scored_pop = []
-        for individual in population:
+        for individual in tqdm(population, desc=f"第 {gen+1} 代運算中", leave=False, colour='green'):
             stats = _evaluate_params_on_universe(target_list, individual, sample_limit=sample_limit)
             scored_pop.append((individual, stats['fitness'], stats))
 
@@ -117,7 +155,11 @@ def run_genetic_algorithm(target_list, generations=15, population_size=40, sampl
         history_best.append(best_fitness)
         history_avg.append(avg_fitness)
 
-        print(f"  目前最佳: 分數={best_fitness:.4f} 訊號數={best_stats['n_signals']} 平均報酬={best_stats['avg_return']:.3f}% 勝率={best_stats['win_rate']:.1f}% 參數={best_individual}")
+        gen_end_time = time.time()  # 🌟 2. 碼錶按停：記錄運算結束的時間
+        elapsed_time = gen_end_time - gen_start_time  # 🌟 3. 計算總共花了幾秒
+
+        # 🌟 4. 把耗時塞進原本印出結果的字串最後面
+        print(f"  目前最佳: 分數={best_fitness:.4f} 訊號數={best_stats['n_signals']} 平均報酬={best_stats['avg_return']:.3f}% 勝率={best_stats['win_rate']:.1f}% 參數={best_individual} ⏱️ 耗時: {elapsed_time:.1f} 秒")
 
         retain_length = max(1, int(retain_top * len(scored_pop)))
         next_gen = [ind for ind, _, _ in scored_pop[:retain_length]]
@@ -191,8 +233,8 @@ def main():
     # --------------------------------------------------
     # 🎯 自訂測試範圍設定區 (取代原本的隨機亂抽)
     # --------------------------------------------------
-    start_index = 50   # 👉 你想從第幾檔股票開始？ (例如: 0 代表第1檔，10 代表第11檔)
-    test_count = 100   # 👉 總共要往後測試幾檔？
+    start_index = 0   # 👉 你想從第幾檔股票開始？ (例如: 0 代表第1檔，10 代表第11檔)
+    test_count = len(stock_list)   # 👉 總共要往後測試幾檔？ 用 len(stock_list) 讓系統自動抓取全部 (1077檔)
     
     # 防呆：確保選取範圍不會超過全市場的股票總數
     if start_index >= len(stock_list): start_index = 0
@@ -200,17 +242,20 @@ def main():
     
     target_list = stock_list[start_index : end_index]
     print(f'本次選取的考題: 從第 {start_index} 檔開始，共 {len(target_list)} 檔 ({target_list[:5]}...)')
+
+    # --------------------------------------------------
+    # 呼叫預載函式，並用回傳的「乾淨清單」覆蓋原本的 target_list
+    target_list = preload_data(target_list)
     # --------------------------------------------------
 
-    preload_data(target_list)
-
+    # 接下來 GA 就只會拿著這份 100% 安全的 target_list 去跑，絕對不會卡住！
     results = run_genetic_algorithm(target_list,
                                    generations=15,       
-                                   population_size=40,   
+                                   population_size=50,   
                                    sample_limit=None,    
                                    retain_top=0.3,       
                                    mutate_chance=0.05,   
-                                   random_seed=None)    
+                                   random_seed=None)
 
     print('\n本次執行的 Top 5 結果:')
     for idx, (ind, fit, stats) in enumerate(results[:5]):
