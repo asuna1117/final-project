@@ -113,7 +113,7 @@ def _evaluate_params_on_universe(target_list, params, sample_limit=None):
     fitness = (win_rate / 100.0) * avg_ret * math.sqrt(n)
     return {'fitness': fitness, 'n_signals': n, 'avg_return': avg_ret, 'win_rate': win_rate}
 
-def run_genetic_algorithm(target_list, generations=15, population_size=40, sample_limit=None,
+def run_genetic_algorithm(target_list, generations=15, population_size=50, sample_limit=None,
                           retain_top=0.3, mutate_chance=0.05, random_seed=None):
     if random_seed is not None:
         random.seed(random_seed)
