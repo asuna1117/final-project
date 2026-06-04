@@ -113,7 +113,7 @@ def _evaluate_params_on_universe(target_list, params, sample_limit=None):
     fitness = (win_rate / 100.0) * avg_ret * math.sqrt(n)
     return {'fitness': fitness, 'n_signals': n, 'avg_return': avg_ret, 'win_rate': win_rate}
 
-def run_genetic_algorithm(target_list, generations=15, population_size=40, sample_limit=None,
+def run_genetic_algorithm(target_list, generations=15, population_size=50, sample_limit=None,
                           retain_top=0.3, mutate_chance=0.05, random_seed=None):
     if random_seed is not None:
         random.seed(random_seed)
@@ -194,6 +194,14 @@ def run_genetic_algorithm(target_list, generations=15, population_size=40, sampl
         stats = _evaluate_params_on_universe(target_list, individual, sample_limit=sample_limit)
         final_scores.append((individual, stats['fitness'], stats))
 
+    # 去重：以參數內容（sorted tuple）當 key，保留最高 fitness 的紀錄
+    unique = {}
+    for ind, fit, stats in final_scores:
+        key = tuple(sorted(ind.items()))
+        if key not in unique or fit > unique[key][1]:
+            unique[key] = (ind, fit, stats)
+    final_scores = list(unique.values())
+    # 再依 fitness 排序（從高到低）
     final_scores.sort(key=lambda x: x[1], reverse=True)
 
     try:
@@ -221,7 +229,6 @@ def main():
         print("="*50)
         print(f"目前歷史最佳紀錄:")
         print(f"分數: {historical_record['fitness']:.4f}")
-        print(f"統計: {historical_record['stats']}")
         print(f"參數: {historical_record['params']}")
         print("="*50)
     else:
