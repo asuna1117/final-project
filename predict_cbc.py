@@ -1,229 +1,168 @@
 import pandas as pd
 import numpy as np
-import crawler  
-from tabulate import tabulate
-import re
-import unicodedata
+import json
+import os
+import crawler
+import backtest
 
 # ==========================================
-# 核心邏輯：判斷某個時間點是否符合進場條件
+# 🔧 輔助函式：動態讀取 GA 最佳化參數
 # ==========================================
-def check_conditions(df, i, continuous_weeks=4, min_growth=0.4, pop_decline_threshold=0.4,
-                     corr_window=156, large_corr_thresh=0.6, retail_corr_thresh=-0.6, avg_corr_thresh=0.6):
-    large_holder_col = '>400張百分比'
-    
-    if i < continuous_weeks: return False, 0, 0, 0, 0
-
-    weekly_growth_a = [((df.at[i-j, large_holder_col] - df.at[i-j-1, large_holder_col]) / df.at[i-j-1, large_holder_col]) * 100 if df.at[i-j-1, large_holder_col] > 0 else -np.inf for j in range(continuous_weeks)]
-    if not all(g > min_growth for g in weekly_growth_a): return False, 0, 0, 0, 0
-
-    weekly_growth_b = [((df.at[i-j, '平均張數/人'] - df.at[i-j-1, '平均張數/人']) / df.at[i-j-1, '平均張數/人']) * 100 if df.at[i-j-1, '平均張數/人'] > 0 else -np.inf for j in range(continuous_weeks)]
-    if not all(g > min_growth for g in weekly_growth_b): return False, 0, 0, 0, 0
-
-    pop_decline_pct = ((df.at[i-continuous_weeks, '總股東人數'] - df.at[i, '總股東人數']) / df.at[i-continuous_weeks, '總股東人數']) * 100
-    if pop_decline_pct <= pop_decline_threshold: return False, 0, 0, 0, 0
-
-    actual_window = min(corr_window, i + 1)
-    x_large = df.loc[i-actual_window+1:i, large_holder_col].reset_index(drop=True)
-    x_avg_per_person = df.loc[i-actual_window+1:i, '平均張數/人'].reset_index(drop=True)
-    x_shareholders = df.loc[i-actual_window+1:i, '總股東人數'].reset_index(drop=True)
-    y_close = df.loc[i-actual_window+1:i, '收盤價'].reset_index(drop=True) 
-
-    corr_val = x_large.corr(y_close)
-    avg_corr_val = x_avg_per_person.corr(y_close)
-    retail_corr_val = x_shareholders.corr(y_close)
-
-    corr_val = 0.0 if pd.isna(corr_val) else corr_val
-    avg_corr_val = 0.0 if pd.isna(avg_corr_val) else avg_corr_val
-    retail_corr_val = 0.0 if pd.isna(retail_corr_val) else retail_corr_val
-
-    if corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh:
-        return True, corr_val, retail_corr_val, avg_corr_val, actual_window
-
-    return False, 0, 0, 0, 0
+def load_best_params():
+    """自動讀取 run_ga.py 訓練出來的 best_params.json"""
+    best_params_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'best_params.json')
+    try:
+        if os.path.exists(best_params_path):
+            with open(best_params_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('params', {})
+    except Exception as e:
+        print(f"⚠️ 讀取最佳參數失敗，將使用預設值 ({e})")
+    return {}
 
 # ==========================================
-# 預測與歷史釣魚模組
+# 🧠 核心邏輯：掃描最新一週並比對歷史軌跡
 # ==========================================
-def scan_latest_and_history(df): 
-    stock_id = df['股票代號'].iloc[0]
-    i_latest = len(df) - 1
-    
-    is_triggered, corr, retail_corr, avg_corr, actual_win = check_conditions(df, i_latest)
-    if not is_triggered:
+def scan_latest_and_history(df, **kwargs):
+    """
+    掃描股票的「最新一週」是否觸發訊號，若觸發則回溯歷史勝率。
+    回傳: (結果字典, 歷史明細字串)
+    """
+    if df is None or df.empty:
         return None, None
-
-    past_trades = []
+        
+    # 1. 載入參數 (優先使用 kwargs，否則用 GA 的最佳參數，最後用預設值)
+    ga_params = load_best_params()
+    ga_params.update(kwargs) # app.py 傳來的參數會覆蓋 GA 參數
     
-    for i_hist in range(4, len(df)-1):
-        hist_trigger, _, _, _, _ = check_conditions(df, i_hist)
-        
-        if hist_trigger:
-            buy_price = df.at[i_hist, '收盤價']
-            prev_price = buy_price
-            consecutive_drops = 0
-            exit_k = 0
-            weekly_records = [] 
-
-            for k in range(1, len(df) - i_hist):
-                curr_price = df.at[i_hist+k, '收盤價']
-                week_ret = ((curr_price - prev_price) / prev_price) * 100
-                weekly_records.append(f"W{k}: {week_ret:+.1f}%")
-
-                if week_ret < 0:
-                    consecutive_drops += 1
-                else:
-                    consecutive_drops = 0
-
-                prev_price = curr_price
-                exit_k = k
-
-                if consecutive_drops >= 2:
-                    break
-
-            cum_ret = ((prev_price - buy_price) / buy_price) * 100
-            past_trades.append({
-                '進場日': df.at[i_hist, '資料日期'],
-                '持股週數': exit_k,
-                '累積報酬': cum_ret,
-                '歷程': ", ".join(weekly_records),
-                '開局秒出場': consecutive_drops >= 2 and exit_k == 2 
-            })
-
-    suggestion = '🎯 建議進場'
-    hist_summary = "無歷史前例"
-    hist_details_str = "無"
+    c_weeks = int(ga_params.get('continuous_weeks', 4))
+    min_g = ga_params.get('min_growth', 0.1)
+    last_w_thresh = ga_params.get('last_week_threshold', 0.5)
+    pop_d = ga_params.get('pop_decline_threshold', 0.5)
     
-    if past_trades:
-        avg_ret = np.mean([t['累積報酬'] for t in past_trades])
+    df = df.sort_values('資料日期', ascending=True).reset_index(drop=True)
+    large_holder_series = backtest._get_large_holder_series(df)
+    
+    if len(df) < c_weeks + 1:
+        return None, None
         
-        bad_starts = sum(1 for t in past_trades if t['開局秒出場'] and t['累積報酬'] < 0)
-        if avg_ret < 0 or (bad_starts / len(past_trades) >= 0.5):
-            suggestion = '❌ 回測不佳'
-
-        hist_summary = f"發生 {len(past_trades)} 次, 平均 {avg_ret:+.2f}%"
+    # 2. 鎖定「最新一週」進行條件判定
+    latest_idx = len(df) - 1
+    
+    # 條件 A: 大戶連續買超，且最後一週達標
+    weekly_growth_a = [((large_holder_series.iat[latest_idx-j] - large_holder_series.iat[latest_idx-j-1]) / large_holder_series.iat[latest_idx-j-1]) * 100 if large_holder_series.iat[latest_idx-j-1] > 0 else -np.inf for j in range(c_weeks)]
+    is_continuous_buy = all(g > 0 for g in weekly_growth_a) and (weekly_growth_a[0] > last_w_thresh)
+    
+    # 條件 B: 平均張數/人連續上升
+    weekly_growth_b = [((df.at[latest_idx-j, '平均張數/人'] - df.at[latest_idx-j-1, '平均張數/人']) / df.at[latest_idx-j-1, '平均張數/人']) * 100 if df.at[latest_idx-j-1, '平均張數/人'] > 0 else -np.inf for j in range(c_weeks)]
+    is_avg_per_person_continuous_up = all(g > min_g for g in weekly_growth_b)
+    
+    # 條件 C: 總股東人數下降
+    pop_decline_pct = ((df.at[latest_idx-c_weeks, '總股東人數'] - df.at[latest_idx, '總股東人數']) / df.at[latest_idx-c_weeks, '總股東人數']) * 100
+    
+    # 若最新一週沒觸發，直接略過
+    if not (is_continuous_buy and is_avg_per_person_continuous_up and pop_decline_pct > pop_d):
+        return None, None
         
-        details_list = []
-        for pt in past_trades:
-            status = "⚠️ 連跌兩週停損" if pt['開局秒出場'] else "✅波段結算"
-            # 確保格式一致，方便下面主程式進行字串切割與排版
-            details_list.append(f"[{pt['進場日']}] 總計 {pt['累積報酬']:>+5.1f}% | 軌跡: {pt['歷程']} ({status})")
+    # ==========================================
+    # 🎯 進入歷史回測區 (因為最新一週觸發了！)
+    # ==========================================
+    stock_id = df['股票代號'].iloc[0]
+    history_details = []
+    win_count = 0
+    total_history = 0
+    
+    # 掃描過去所有週次，尋找相同的型態
+    for j in range(c_weeks, len(df) - 1):
+        h_growth_a = [((large_holder_series.iat[j-k] - large_holder_series.iat[j-k-1]) / large_holder_series.iat[j-k-1]) * 100 if large_holder_series.iat[j-k-1] > 0 else -np.inf for k in range(c_weeks)]
+        h_is_buy = all(g > 0 for g in h_growth_a) and (h_growth_a[0] > last_w_thresh)
         
-        hist_details_str = "\n".join(details_list)
-
-    result_dict = {
+        h_growth_b = [((df.at[j-k, '平均張數/人'] - df.at[j-k-1, '平均張數/人']) / df.at[j-k-1, '平均張數/人']) * 100 if df.at[j-k-1, '平均張數/人'] > 0 else -np.inf for k in range(c_weeks)]
+        h_is_avg_up = all(g > min_g for g in h_growth_b)
+        
+        h_pop_d = ((df.at[j-c_weeks, '總股東人數'] - df.at[j, '總股東人數']) / df.at[j-c_weeks, '總股東人數']) * 100
+        
+        # 歷史上也發生過一樣的訊號
+        if h_is_buy and h_is_avg_up and h_pop_d > pop_d:
+            total_history += 1
+            buy_p = crawler.get_next_monday_open_price(stock_id, df.at[j, '資料日期'])
+            sell_p = crawler.get_next_friday_close_price(stock_id, df.at[j, '資料日期'])
+            
+            if buy_p > 0 and not pd.isna(sell_p):
+                ret = ((sell_p - buy_p) / buy_p) * 100
+                if ret > 0: win_count += 1
+                status = f"(報酬: {ret:.2f}%)"
+                # 配合 test.py 的正則表達式，格式必須精準
+                history_details.append(f"{df.at[j, '資料日期']} 軌跡: 買進 {buy_p:.2f}, 賣出 {sell_p:.2f} {status}")
+            else:
+                history_details.append(f"{df.at[j, '資料日期']} 軌跡: 缺價, 無法結算 (未平倉)")
+                
+    win_rate = (win_count / total_history * 100) if total_history > 0 else 0
+    
+    # 判定綜合建議
+    if total_history == 0:
+        recommendation = "⚠️ 尚無歷史可考 (盲測)"
+        hist_str = "無"
+    elif win_rate >= 50:
+        recommendation = "🎯 建議進場"
+        hist_str = "\n".join(history_details)
+    else:
+        recommendation = "❌ 回測不佳"
+        hist_str = "\n".join(history_details)
+        
+    # 產出該股票的預測報告
+    res = {
         '代號': stock_id,
-        '發布日': df.at[i_latest, '資料日期'],
-        f'大戶({actual_win}週)': round(float(corr), 3),
-        f'散戶({actual_win}週)': round(float(retail_corr), 3),
-        f'均張({actual_win}週)': round(float(avg_corr), 3),
-        '收盤價': df.at[i_latest, '收盤價'],
-        '相似型態勝率': hist_summary,
-        '歷史走勢明細': hist_details_str, 
-        '建議': suggestion
+        '最新觸發日': df.at[latest_idx, '資料日期'],
+        '歷史觸發次數': total_history,
+        '歷史勝率': f"{win_rate:.1f}%",
+        '建議': recommendation,
+        '歷史走勢明細': hist_str
     }
-
-    return result_dict, past_trades
+    return res, hist_str
 
 # ==========================================
-# 預測總司令
+# 🚀 總司令：取得下週推薦清單 (供 test.py 呼叫)
 # ==========================================
-def get_next_week_recommendations(target_list):
+def get_next_week_recommendations(target_list, **kwargs):
+    """輸入股票清單，自動回傳下週實戰買進 DataFrame"""
+    import sys
     recommendations = []
     total = len(target_list)
-
-    for i, sid in enumerate(target_list):
-        print(f"🔎 掃描預測 [{i + 1}/{total}] {sid}...", end="\r", flush=True) 
+    print(f"\n🔍 開始啟動預測雷達，掃描全市場最新訊號，共 {total} 檔...")
+    
+    # 🌟 新增：一開始就先載入「代號 -> 名稱」對應表
+    stock_mapping = crawler.get_stock_name_mapping() if hasattr(crawler, 'get_stock_name_mapping') else {}
+    
+    for idx, sid in enumerate(target_list):
+        print(f"  👉 [{idx+1:04d}/{total:04d}] 掃描 {sid}...", end="\r", flush=True)
         
+        # 呼叫爬蟲取得籌碼資料
         df = crawler.get_individual_stock_data(sid)
-        if df is None or df.empty:
-            continue
-
-        res, past_trades = scan_latest_and_history(df)
-        
-        if res:
-            recommendations.append(res)
-            print(f"🔎 掃描預測 [{i + 1}/{total}] {sid}... 🔔 發現預測訊號！{' ' * 20}")
-
+        if df is not None and not df.empty:
+            res, _ = scan_latest_and_history(df, **kwargs)
+            if res:
+                # 把名稱塞進這檔股票的預測結果中
+                res['名稱'] = stock_mapping.get(sid, "未知")
+                recommendations.append(res)
+                
+    print("\n✅ 掃描完成！準備產生實戰清單...")
+    
     if recommendations:
-        return pd.DataFrame(recommendations).sort_values('代號')
+        df_res = pd.DataFrame(recommendations)
+        
+        # 重新排序 DataFrame 欄位，讓「名稱」緊跟在「代號」後面
+        cols = ['代號', '名稱', '最新觸發日', '歷史觸發次數', '歷史勝率', '建議', '歷史走勢明細']
+        cols = [c for c in cols if c in df_res.columns]
+        df_res = df_res[cols]
+        
+        # 🌟 新增：客製化多重排序邏輯
+        # 1. 定義「建議」欄位的自訂優先順序
+        recommendation_order = ["🎯 建議進場", "❌ 回測不佳", "⚠️ 尚無歷史可考 (盲測)"]
+        df_res['建議'] = pd.Categorical(df_res['建議'], categories=recommendation_order, ordered=True)
+        
+        # 2. 先照「建議」的自訂順序排，如果相同，再照「代號」由小到大排
+        return df_res.sort_values(['建議', '代號'], ascending=[True, True])
     else:
         return pd.DataFrame()
 
-# ==========================================
-# 輔助函式：計算中英文混合字串的視覺寬度
-# ==========================================
-def get_display_width(text):
-    """精準計算終端機上的字元寬度 (全形佔2格，半形佔1格)"""
-    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in text)
-
-# ==========================================
-# 主程式
-# ==========================================
-if __name__ == "__main__":
-    print("🚀 啟動下週推薦股掃描引擎...")
-    
-    stock_list = crawler.get_stock_ids(crawler.list_url)
-    
-    if not stock_list:
-        print("❌ 無法取得股票清單，程式結束。")
-    else:
-        target_list = stock_list 
-        print(f"準備掃描全部共 {len(target_list)} 檔股票... \n")
-        
-        recommend_df = get_next_week_recommendations(target_list)
-        
-        print("\n" + "=" * 110)
-        if not recommend_df.empty:
-            print("🎯 掃描完畢！發現以下【下週實戰推薦清單】：")
-            print("=" * 110)
-            
-            display_df = recommend_df.drop(columns=['歷史走勢明細'])
-            print(tabulate(display_df, headers='keys', tablefmt='simple', showindex=False))
-            
-            print("\n" + "=" * 110)
-            print("📜 【歷史相似走勢 - 深度明細解析】")
-            print("=" * 110)
-            
-            # 🌟 魔法核心：自動偵測寬度並精準換行對齊
-            for idx, row in recommend_df.iterrows():
-                print(f"🔸 股票代號: 【 {row['代號']} 】 | 綜合建議: {row['建議']}")
-                if row['歷史走勢明細'] == "無":
-                    print("   └─ 歷史上尚無完全相同之訊號可供比對。")
-                else:
-                    trades = row['歷史走勢明細'].split('\n')
-                    for trade_str in trades:
-                        # 用正則表達式把字串切成：前綴、軌跡明細、結尾狀態
-                        match = re.search(r'(.*軌跡: )(.*) (\(.*)', trade_str)
-                        if match:
-                            prefix = "   └─ " + match.group(1)
-                            trajectory_str = match.group(2)
-                            status_str = " " + match.group(3)
-                            
-                            weeks = trajectory_str.split(', ')
-                            
-                            # 測量前綴在終端機佔了多寬，產生對應數量的空白
-                            indent_width = get_display_width(prefix)
-                            indent_spaces = " " * indent_width
-                            
-                            # 每 8 週斷行一次 (你也可以改成 10 或其他數字)
-                            chunk_size = 8
-                            lines = []
-                            for i in range(0, len(weeks), chunk_size):
-                                lines.append(", ".join(weeks[i:i+chunk_size]))
-                            
-                            # 組合！第一行不加空白，第二行開始加上精準的空白縮排
-                            formatted_trajectory = f",\n{indent_spaces}".join(lines)
-                            
-                            print(f"{prefix}{formatted_trajectory}{status_str}")
-                        else:
-                            # 萬一格式抓錯的防呆機制
-                            print(f"   └─ {trade_str}")
-                print("-" * 110)
-
-            print("\n💡 判讀教學：")
-            print("若「綜合建議」顯示為『❌ 回測不佳』，代表此股票過去發生相同訊號時，")
-            print("多半會立刻遭遇連續兩週下跌的停損出場，或歷史平均報酬為負，請避開陷阱。")
-        else:
-            print("⚠️ 掃描完畢，目前的清單中【沒有】剛好在最新一週觸發進場訊號的股票。")
-            print("=" * 110)
