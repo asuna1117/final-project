@@ -222,27 +222,44 @@ def get_stock_ids(url=list_url, force_update=False):
     except: return []
 
 def get_individual_stock_data(stock_id, force_update=False):
-    """取得單一股票籌碼資料"""
+    """取得單一股票籌碼資料 (具備防誤殺與黑名單假釋機制)"""
     file_path = os.path.join(DATA_DIR, f"{stock_id}.csv")
     
+    # 檢查檔案是否超過 12 小時 (正常資料的快取)
     if os.path.exists(file_path):
         file_age = time.time() - os.path.getmtime(file_path)
         if file_age > 43200: 
             force_update = True 
             
+    # 讀取本地快取
     if not force_update and os.path.exists(file_path):
         try:
             df = pd.read_csv(file_path)
-            if '>1000張百分比' in df.columns:
-                df['股票代號'] = df['股票代號'].astype(str).str.zfill(4)
-                df['資料日期'] = df['資料日期'].astype(str)
+            # 🌟 防誤殺機制：檢查黑名單是否超過「假釋期」(例如 30 天 = 2592000 秒)
+            if '無資料' in df.columns:
+                file_age = time.time() - os.path.getmtime(file_path)
+                if file_age < 2592000:
+                    return None  # 還在黑名單效期內，直接跳過
+                else:
+                    force_update = True  # 超過 30 天，強制重新爬取看看有沒有新資料
+                    
+            elif '>1000張百分比' in df.columns or '>400張百分比' in df.columns:
+                if '股票代號' in df.columns:
+                    df['股票代號'] = df['股票代號'].astype(str).str.zfill(4)
+                if '資料日期' in df.columns:
+                    df['資料日期'] = df['資料日期'].astype(str)
                 return df
+        except: 
             force_update = True
-        except: pass
 
     url = f"https://norway.twsthr.info/StockHolders.aspx?stock={stock_id}"
     try:
-        r = requests.get(url, headers=headers)
+        r = requests.get(url, headers=headers, timeout=5)
+        
+        # 🌟 防誤殺機制：如果網頁伺服器掛掉(不是200 OK)，直接回傳None，絕對不要存成黑名單！
+        if r.status_code != 200:
+            return None
+            
         r.encoding = 'utf-8'
         soup = BeautifulSoup(r.text, 'lxml')
         data_rows = []
@@ -257,7 +274,11 @@ def get_individual_stock_data(stock_id, force_update=False):
                     if 0 < float(row['收盤價']) < 100000: data_rows.append(row)
                 except: continue
         
-        if not data_rows: return None
+        # 如果網頁正常，但真的解析不到資料，才更新黑名單檔案
+        if not data_rows: 
+            pd.DataFrame(columns=['無資料']).to_csv(file_path, index=False, encoding='utf-8-sig')
+            return None
+            
         df = pd.DataFrame(data_rows).drop_duplicates(subset=['資料日期'])
         for col in ['總張數','總股東人數', '平均張數/人', '>1000張百分比', '>400張百分比', '收盤價']: 
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -266,4 +287,6 @@ def get_individual_stock_data(stock_id, force_update=False):
         df = df.sort_values('資料日期', ascending=True).reset_index(drop=True)
         df.to_csv(file_path, index=False, encoding='utf-8-sig')
         return df
-    except: return None
+    except: 
+        # 發生 Timeout 或是連線錯誤，直接回傳，不記錄黑名單
+        return None
