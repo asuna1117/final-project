@@ -39,6 +39,16 @@ def scan_latest_and_history(df, **kwargs):
     min_g = ga_params.get('min_growth', 0.1)
     last_w_thresh = ga_params.get('last_week_threshold', 0.5)
     pop_d = ga_params.get('pop_decline_threshold', 0.5)
+    use_tej_filters = ga_params.get('use_tej_filters', False)
+    foreign_net_min = ga_params.get('foreign_net_min', 0)
+    investment_net_min = ga_params.get('investment_net_min', 0)
+    margin_change_max = ga_params.get('margin_change_max', 0)
+    short_change_min = ga_params.get('short_change_min', 0)
+    use_twse_extra_filters = ga_params.get('use_twse_extra_filters', False)
+    require_foreign_3d = ga_params.get('require_foreign_3d', False)
+    require_margin_low = ga_params.get('require_margin_low', False)
+    margin_low_lookback_days = ga_params.get('margin_low_lookback_days', 60)
+    margin_low_percentile = ga_params.get('margin_low_percentile', 20)
     
     df = df.sort_values('資料日期', ascending=True).reset_index(drop=True)
     large_holder_series = backtest._get_large_holder_series(df)
@@ -59,6 +69,39 @@ def scan_latest_and_history(df, **kwargs):
     
     # 條件 C: 總股東人數下降
     pop_decline_pct = ((df.at[latest_idx-c_weeks, '總股東人數'] - df.at[latest_idx, '總股東人數']) / df.at[latest_idx-c_weeks, '總股東人數']) * 100
+
+    if use_tej_filters:
+        tej_checks = []
+        if '外資買賣超' in df.columns:
+            v = df.at[latest_idx, '外資買賣超']
+            tej_checks.append(pd.notna(v) and v >= foreign_net_min)
+        if '投信買賣超' in df.columns:
+            v = df.at[latest_idx, '投信買賣超']
+            tej_checks.append(pd.notna(v) and v >= investment_net_min)
+        if '融資增減' in df.columns:
+            v = df.at[latest_idx, '融資增減']
+            tej_checks.append(pd.notna(v) and v <= margin_change_max)
+        if '融券增減' in df.columns:
+            v = df.at[latest_idx, '融券增減']
+            tej_checks.append(pd.notna(v) and v >= short_change_min)
+        if tej_checks and not all(tej_checks):
+            return None, None
+
+    if use_twse_extra_filters:
+        twse_checks = []
+        if require_foreign_3d:
+            twse_checks.append(crawler.check_twse_foreign_consecutive_buy(df['股票代號'].iloc[0], df.at[latest_idx, '資料日期'], consecutive_days=3))
+        if require_margin_low:
+            twse_checks.append(
+                crawler.check_twse_margin_balance_low(
+                    df['股票代號'].iloc[0],
+                    df.at[latest_idx, '資料日期'],
+                    lookback_days=margin_low_lookback_days,
+                    percentile=margin_low_percentile,
+                )
+            )
+        if twse_checks and not all(twse_checks):
+            return None, None
     
     # 若最新一週沒觸發，直接略過
     if not (is_continuous_buy and is_avg_per_person_continuous_up and pop_decline_pct > pop_d):
@@ -81,6 +124,39 @@ def scan_latest_and_history(df, **kwargs):
         h_is_avg_up = all(g > min_g for g in h_growth_b)
         
         h_pop_d = ((df.at[j-c_weeks, '總股東人數'] - df.at[j, '總股東人數']) / df.at[j-c_weeks, '總股東人數']) * 100
+
+        if use_tej_filters:
+            tej_checks = []
+            if '外資買賣超' in df.columns:
+                v = df.at[j, '外資買賣超']
+                tej_checks.append(pd.notna(v) and v >= foreign_net_min)
+            if '投信買賣超' in df.columns:
+                v = df.at[j, '投信買賣超']
+                tej_checks.append(pd.notna(v) and v >= investment_net_min)
+            if '融資增減' in df.columns:
+                v = df.at[j, '融資增減']
+                tej_checks.append(pd.notna(v) and v <= margin_change_max)
+            if '融券增減' in df.columns:
+                v = df.at[j, '融券增減']
+                tej_checks.append(pd.notna(v) and v >= short_change_min)
+            if tej_checks and not all(tej_checks):
+                continue
+
+        if use_twse_extra_filters:
+            twse_checks = []
+            if require_foreign_3d:
+                twse_checks.append(crawler.check_twse_foreign_consecutive_buy(stock_id, df.at[j, '資料日期'], consecutive_days=3))
+            if require_margin_low:
+                twse_checks.append(
+                    crawler.check_twse_margin_balance_low(
+                        stock_id,
+                        df.at[j, '資料日期'],
+                        lookback_days=margin_low_lookback_days,
+                        percentile=margin_low_percentile,
+                    )
+                )
+            if twse_checks and not all(twse_checks):
+                continue
         
         # 歷史上也發生過一樣的訊號
         if h_is_buy and h_is_avg_up and h_pop_d > pop_d:

@@ -48,11 +48,11 @@ def analyze_data_pipeline(_raw_data_dict, strategy_params):
 # 核心管線 3：下週預測 (透過 predict_cbc 模組)
 # ==========================================
 @st.cache_data(show_spinner=False)
-def predict_data_pipeline(_raw_data_dict):
+def predict_data_pipeline(_raw_data_dict, strategy_params):
     recommendations = []
     for sid, df in _raw_data_dict.items():
         # 呼叫組員最新的 predict_cbc 模組
-        res, _ = predict_cbc.scan_latest_and_history(df)
+        res, _ = predict_cbc.scan_latest_and_history(df, **strategy_params)
         if res is not None:
             recommendations.append(res)
             
@@ -77,6 +77,8 @@ def update_num(): st.session_state.num_val = st.session_state.slider_val
 if 'slider_val' not in st.session_state: st.session_state.slider_val = 50
 if 'num_val' not in st.session_state: st.session_state.num_val = 50
 
+use_tej_enrichment = st.sidebar.checkbox("啟用 TEJ 資料擴充", value=False)
+
 st.sidebar.number_input("手動輸入抓取數量：", min_value=10, max_value=2000, step=10, key='num_val', on_change=update_slider)
 st.sidebar.slider("或用滑鼠微調：", min_value=10, max_value=2000, step=10, key='slider_val', on_change=update_num, label_visibility="collapsed")
 fetch_count = st.session_state.num_val
@@ -86,9 +88,36 @@ fetch_button = st.sidebar.button("1️⃣ 啟動爬蟲更新資料", type="secon
 if fetch_button:
     stock_list = crawler.get_stock_ids(crawler.list_url)[:fetch_count] 
     st.session_state['raw_data'] = fetch_data_pipeline(stock_list)
+
+    if use_tej_enrichment:
+        enriched_data = {}
+        for sid, df in st.session_state['raw_data'].items():
+            enriched_data[sid] = crawler.enrich_with_tej_features(df, sid)
+        st.session_state['raw_data'] = enriched_data
+
     st.sidebar.success("✅ 爬蟲執行完畢，資料已就緒！")
 
 st.sidebar.markdown("---")
+
+# --- TWSE 公開資料區 ---
+st.sidebar.header("🗞️ TWSE 公開資料")
+twse_foreign_preload_days = st.sidebar.number_input("外資快取天數", min_value=1, max_value=30, value=7, step=1)
+twse_margin_preload_days = st.sidebar.number_input("融資快取天數", min_value=1, max_value=120, value=60, step=1)
+preload_twse_button = st.sidebar.button("先下載 TWSE CSV 快取", type="secondary", use_container_width=True)
+download_twse_button = st.sidebar.button("下載今天外資買賣超", type="secondary", use_container_width=True)
+
+if preload_twse_button:
+    twse_foreign_files = crawler.preload_twse_foreign_buy_sell(days_back=int(twse_foreign_preload_days), force_update=False)
+    twse_margin_files = crawler.preload_twse_margin_data(days_back=int(twse_margin_preload_days), force_update=False)
+    st.session_state['twse_preload_summary'] = {
+        'foreign_files': twse_foreign_files,
+        'margin_files': twse_margin_files,
+    }
+
+if download_twse_button:
+    twse_df, export_file = crawler.export_today_twse_foreign_buy_sell_csv(force_update=True)
+    st.session_state['twse_foreign_today'] = twse_df
+    st.session_state['twse_foreign_export_file'] = export_file
 
 # --- 第二階段參數設定 ---
 st.sidebar.header("⚙️ 階段二：客製化參數設定")
@@ -96,6 +125,20 @@ st.sidebar.header("⚙️ 階段二：客製化參數設定")
 c_weeks = st.sidebar.number_input("連續買超週數", min_value=2, max_value=12, value=4)
 min_g = st.sidebar.number_input("大戶每週最低增長率 (%)", min_value=0.0, max_value=5.0, value=0.1, step=0.1)
 pop_d = st.sidebar.number_input("散戶減少最低門檻 (%)", min_value=0.0, max_value=10.0, value=0.5, step=0.1)
+
+st.sidebar.markdown("##### 🧩 TEJ 條件設定")
+use_tej_filters = st.sidebar.checkbox("啟用 TEJ 法人 / 融資條件", value=False)
+foreign_net_min = st.sidebar.number_input("外資買賣超最低門檻", value=0, step=100000)
+investment_net_min = st.sidebar.number_input("投信買賣超最低門檻", value=0, step=100000)
+margin_change_max = st.sidebar.number_input("融資增減上限(可為負)", value=0, step=100000)
+short_change_min = st.sidebar.number_input("融券增減下限", value=0, step=100000)
+
+st.sidebar.markdown("##### 🧭 TWSE 進一步檢查")
+use_twse_extra_filters = st.sidebar.checkbox("啟用 TWSE 進一步檢查", value=False)
+require_foreign_3d = st.sidebar.checkbox("外資連續買超三日", value=True)
+require_margin_low = st.sidebar.checkbox("融資餘額處於低檔", value=False)
+margin_low_lookback_days = st.sidebar.number_input("融資低檔回看天數", min_value=20, max_value=240, value=60, step=5)
+margin_low_percentile = st.sidebar.slider("融資低檔百分位", min_value=5, max_value=50, value=20, step=5)
 
 st.sidebar.markdown("##### 📐 相關係數門檻設定")
 # 配合組員升級為 3年(156週)，調整拉桿上限與預設值
@@ -111,7 +154,18 @@ strategy_params = {
     'corr_window': c_win,
     'large_corr_thresh': l_corr,
     'retail_corr_thresh': r_corr,
-    'avg_corr_thresh': a_corr
+    'avg_corr_thresh': a_corr,
+    'use_tej_filters': use_tej_filters,
+    'foreign_net_min': foreign_net_min,
+    'investment_net_min': investment_net_min,
+    'margin_change_max': margin_change_max,
+    'short_change_min': short_change_min,
+    'use_tej_enrichment': use_tej_enrichment,
+    'use_twse_extra_filters': use_twse_extra_filters,
+    'require_foreign_3d': require_foreign_3d,
+    'require_margin_low': require_margin_low,
+    'margin_low_lookback_days': margin_low_lookback_days,
+    'margin_low_percentile': margin_low_percentile,
 }
 
 st.sidebar.markdown("---")
@@ -129,7 +183,7 @@ if filter_button:
     else:
         # 同時運算回測與預測
         st.session_state['filtered_trades'] = analyze_data_pipeline(st.session_state['raw_data'], strategy_params)
-        st.session_state['predictions'] = predict_data_pipeline(st.session_state['raw_data'])
+        st.session_state['predictions'] = predict_data_pipeline(st.session_state['raw_data'], strategy_params)
 
 if 'filtered_trades' in st.session_state:
     trades_df = st.session_state['filtered_trades']
@@ -204,3 +258,24 @@ if 'filtered_trades' in st.session_state:
             * 若「綜合建議」顯示為『❌ 回測不佳』，代表此股票過去發生相同訊號時，多半會立刻遭遇連續兩週下跌的停損出場，或歷史平均報酬為負，請避開陷阱。
             * 若顯示為『🎯 建議進場』，代表該股歷史上出現此形態時具備正向期望值。
             """)
+
+if 'twse_foreign_today' in st.session_state:
+    st.markdown("---")
+    st.subheader("🗞️ TWSE 今天外資買賣超")
+    twse_df = st.session_state['twse_foreign_today']
+    if twse_df is None or twse_df.empty:
+        st.info("目前查無今天或最近可用交易日的 TWSE 外資買賣超資料。")
+    else:
+        export_file = st.session_state.get('twse_foreign_export_file')
+        if export_file:
+            st.success(f"已匯出 CSV：{export_file}")
+        display_cols = [col for col in ['資料日期', '股票代號', '股票名稱', '外資買賣超', '投信買賣超', '自營商買賣超', '三大法人買賣超'] if col in twse_df.columns]
+        st.dataframe(twse_df[display_cols], width="stretch", hide_index=True)
+
+if 'twse_preload_summary' in st.session_state:
+    st.markdown("---")
+    st.subheader("🧾 TWSE CSV 快取狀態")
+    preload_summary = st.session_state['twse_preload_summary']
+    st.success(
+        f"已預載外資 CSV {len(preload_summary.get('foreign_files', []))} 份，融資 CSV {len(preload_summary.get('margin_files', []))} 份。"
+    )

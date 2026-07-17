@@ -22,13 +22,71 @@ def _get_large_holder_series(df):
     return pd.Series(np.where(close_price > 100, large_400, large_1000), index=df.index)
 
 
+def _passes_tej_filters(df, idx, use_tej_filters=False,
+                        foreign_net_min=0, investment_net_min=0,
+                        margin_change_max=0, short_change_min=0):
+    if not use_tej_filters:
+        return True
+
+    if idx >= len(df):
+        return False
+
+    checks = []
+
+    if "外資買賣超" in df.columns:
+        value = df.at[idx, "外資買賣超"]
+        checks.append(pd.notna(value) and value >= foreign_net_min)
+
+    if "投信買賣超" in df.columns:
+        value = df.at[idx, "投信買賣超"]
+        checks.append(pd.notna(value) and value >= investment_net_min)
+
+    if "融資增減" in df.columns:
+        value = df.at[idx, "融資增減"]
+        checks.append(pd.notna(value) and value <= margin_change_max)
+
+    if "融券增減" in df.columns:
+        value = df.at[idx, "融券增減"]
+        checks.append(pd.notna(value) and value >= short_change_min)
+
+    return all(checks) if checks else True
+
+
+def _passes_twse_extra_filters(stock_id, signal_date, use_twse_extra_filters=False,
+                               require_foreign_3d=False, require_margin_low=False,
+                               margin_low_lookback_days=60, margin_low_percentile=20):
+    if not use_twse_extra_filters:
+        return True
+
+    checks = []
+
+    if require_foreign_3d:
+        checks.append(crawler.check_twse_foreign_consecutive_buy(stock_id, signal_date, consecutive_days=3))
+
+    if require_margin_low:
+        checks.append(
+            crawler.check_twse_margin_balance_low(
+                stock_id,
+                signal_date,
+                lookback_days=margin_low_lookback_days,
+                percentile=margin_low_percentile,
+            )
+        )
+
+    return all(checks) if checks else True
+
+
 
 # ==========================================
 # 核心功能：回測邏輯 (相關係數使用進場日前全部週次)
 # ==========================================
 def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.1634, last_week_threshold=0.568, pop_decline_threshold=0.607,
                               corr_window=156, large_corr_thresh=0.6, 
-                              retail_corr_thresh=-0.6, avg_corr_thresh=0.6): 
+                              retail_corr_thresh=-0.6, avg_corr_thresh=0.6,
+                              use_tej_filters=False, foreign_net_min=0, investment_net_min=0,
+                              margin_change_max=0, short_change_min=0, use_tej_enrichment=False,
+                              use_twse_extra_filters=False, require_foreign_3d=False, require_margin_low=False,
+                              margin_low_lookback_days=60, margin_low_percentile=20): 
     
     stock_id = df_group['股票代號'].iloc[0]
     df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
@@ -75,6 +133,24 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.1634, l
             if not (corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh):
                 continue
 
+            if not _passes_tej_filters(df, i, use_tej_filters=use_tej_filters,
+                                       foreign_net_min=foreign_net_min,
+                                       investment_net_min=investment_net_min,
+                                       margin_change_max=margin_change_max,
+                                       short_change_min=short_change_min):
+                continue
+
+            if not _passes_twse_extra_filters(
+                stock_id,
+                df.at[i, '資料日期'],
+                use_twse_extra_filters=use_twse_extra_filters,
+                require_foreign_3d=require_foreign_3d,
+                require_margin_low=require_margin_low,
+                margin_low_lookback_days=margin_low_lookback_days,
+                margin_low_percentile=margin_low_percentile,
+            ):
+                continue
+
             # 🌟 呼叫 crawler 裡的抓股價功能
             buy_price = crawler.get_next_monday_open_price(stock_id, df.at[i, '資料日期'])
             sell_price = crawler.get_next_friday_close_price(stock_id, df.at[i, '資料日期'])
@@ -101,7 +177,11 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.1634, l
 
 def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, last_week_threshold=2.0, pop_decline_threshold=0.5,
                       corr_window=156, large_corr_thresh=0.6,
-                      retail_corr_thresh=-0.6, avg_corr_thresh=0.6):
+                      retail_corr_thresh=-0.6, avg_corr_thresh=0.6,
+                      use_tej_filters=False, foreign_net_min=0, investment_net_min=0,
+                      margin_change_max=0, short_change_min=0, use_tej_enrichment=False,
+                      use_twse_extra_filters=False, require_foreign_3d=False, require_margin_low=False,
+                      margin_low_lookback_days=60, margin_low_percentile=20):
     """檢查是否曾出現符合 A~D 的任一訊號，作為是否進入 Yahoo 抓價流程的預篩。"""
     df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
     large_holder_series = _get_large_holder_series(df)
@@ -137,7 +217,21 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, last_week_th
         retail_corr_val = 0.0 if pd.isna(retail_corr_val) else retail_corr_val
 
         if corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh:
-            return True
+            if _passes_tej_filters(df, i, use_tej_filters=use_tej_filters,
+                                   foreign_net_min=foreign_net_min,
+                                   investment_net_min=investment_net_min,
+                                   margin_change_max=margin_change_max,
+                                   short_change_min=short_change_min):
+                if _passes_twse_extra_filters(
+                    df_group['股票代號'].iloc[0],
+                    df.at[i, '資料日期'],
+                    use_twse_extra_filters=use_twse_extra_filters,
+                    require_foreign_3d=require_foreign_3d,
+                    require_margin_low=require_margin_low,
+                    margin_low_lookback_days=margin_low_lookback_days,
+                    margin_low_percentile=margin_low_percentile,
+                ):
+                    return True
 
     return False
 
@@ -145,10 +239,11 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, last_week_th
 # ==========================================
 # 回測總司令函式
 # ==========================================
-def run_all_analysis(target_list):
+def run_all_analysis(target_list, **kwargs):
     all_dfs = []
     all_trades = []
     total = len(target_list)
+    use_tej_enrichment = kwargs.get("use_tej_enrichment", False)
 
     for i, sid in enumerate(target_list):
         print(f"[{i + 1}/{total}] {sid}...", end=" ", flush=True)
@@ -159,6 +254,9 @@ def run_all_analysis(target_list):
             print("Skip (無籌碼資料)")
             continue
 
+        if use_tej_enrichment:
+            df = crawler.enrich_with_tej_features(df, sid)
+
         # 🌟 先下載該股票 3 年價格歷史 (快取 12 小時)
         price_data = crawler.download_stock_price_history(sid)
         if price_data is None or price_data.empty:
@@ -166,12 +264,12 @@ def run_all_analysis(target_list):
             continue
 
         # 只對曾經觸發 A~D 的股票進行後續 Yahoo 抓價與回測
-        if not has_any_ad_signal(df):
+        if not has_any_ad_signal(df, **kwargs):
             print("Skip (未觸發A~D)")
             continue
 
         all_dfs.append(df)
-        trades = backtest_squeeze_strategy(df)
+        trades = backtest_squeeze_strategy(df, **kwargs)
         all_trades.extend(trades)
 
         print(f"OK ({len(df)}週籌碼, 訊號{len(trades)}筆)")
