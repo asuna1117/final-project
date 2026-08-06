@@ -4,8 +4,9 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from tabulate import tabulate
 import crawler # 🌟 引入剛剛建好的爬蟲模組
+import crawler_finmind
 
-
+ml_dataset = []
 
 def _get_large_holder_series(df):
     """依該列收盤價動態決定使用 >400 或 >1000 張百分比。"""
@@ -22,71 +23,13 @@ def _get_large_holder_series(df):
     return pd.Series(np.where(close_price > 100, large_400, large_1000), index=df.index)
 
 
-def _passes_tej_filters(df, idx, use_tej_filters=False,
-                        foreign_net_min=0, investment_net_min=0,
-                        margin_change_max=0, short_change_min=0):
-    if not use_tej_filters:
-        return True
-
-    if idx >= len(df):
-        return False
-
-    checks = []
-
-    if "外資買賣超" in df.columns:
-        value = df.at[idx, "外資買賣超"]
-        checks.append(pd.notna(value) and value >= foreign_net_min)
-
-    if "投信買賣超" in df.columns:
-        value = df.at[idx, "投信買賣超"]
-        checks.append(pd.notna(value) and value >= investment_net_min)
-
-    if "融資增減" in df.columns:
-        value = df.at[idx, "融資增減"]
-        checks.append(pd.notna(value) and value <= margin_change_max)
-
-    if "融券增減" in df.columns:
-        value = df.at[idx, "融券增減"]
-        checks.append(pd.notna(value) and value >= short_change_min)
-
-    return all(checks) if checks else True
-
-
-def _passes_twse_extra_filters(stock_id, signal_date, use_twse_extra_filters=False,
-                               require_foreign_3d=False, require_margin_low=False,
-                               margin_low_lookback_days=60, margin_low_percentile=20):
-    if not use_twse_extra_filters:
-        return True
-
-    checks = []
-
-    if require_foreign_3d:
-        checks.append(crawler.check_twse_foreign_consecutive_buy(stock_id, signal_date, consecutive_days=3))
-
-    if require_margin_low:
-        checks.append(
-            crawler.check_twse_margin_balance_low(
-                stock_id,
-                signal_date,
-                lookback_days=margin_low_lookback_days,
-                percentile=margin_low_percentile,
-            )
-        )
-
-    return all(checks) if checks else True
-
-
 
 # ==========================================
 # 核心功能：回測邏輯 (相關係數使用進場日前全部週次)
 # ==========================================
-def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.1634, last_week_threshold=0.568, pop_decline_threshold=0.607,
+def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, last_week_threshold=0.179, pop_decline_threshold=0.198,
                               corr_window=156, large_corr_thresh=0.6, 
-                              retail_corr_thresh=-0.6, avg_corr_thresh=0.6,
-                              use_tej_filters=False, foreign_net_min=0, investment_net_min=0,
-                              margin_change_max=0, short_change_min=0, use_tej_enrichment=False,
-                              use_twse_extra_filters=False, require_foreign_3d=False, require_margin_low=False,
-                              margin_low_lookback_days=60, margin_low_percentile=20): 
+                              retail_corr_thresh=-0.6, avg_corr_thresh=0.6, skip_cond_e=False):
     
     stock_id = df_group['股票代號'].iloc[0]
     df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
@@ -133,55 +76,86 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.1634, l
             if not (corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh):
                 continue
 
-            if not _passes_tej_filters(df, i, use_tej_filters=use_tej_filters,
-                                       foreign_net_min=foreign_net_min,
-                                       investment_net_min=investment_net_min,
-                                       margin_change_max=margin_change_max,
-                                       short_change_min=short_change_min):
-                continue
+            # 🌟 修復：確保傳給 crawler 的日期是標準的 'YYYY-MM-DD' 字串
+            entry_date = df.at[i, '資料日期']
+            if isinstance(entry_date, pd.Timestamp):
+                date_str = entry_date.strftime('%Y-%m-%d')
+            else:
+                date_str = str(entry_date)
 
-            if not _passes_twse_extra_filters(
-                stock_id,
-                df.at[i, '資料日期'],
-                use_twse_extra_filters=use_twse_extra_filters,
-                require_foreign_3d=require_foreign_3d,
-                require_margin_low=require_margin_low,
-                margin_low_lookback_days=margin_low_lookback_days,
-                margin_low_percentile=margin_low_percentile,
-            ):
-                continue
+            # 🌟 呼叫 crawler 裡的抓股價功能 (使用 date_str)
+            buy_price = crawler.get_next_monday_open_price(stock_id, date_str)
+            sell_price = crawler.get_next_friday_close_price(stock_id, date_str)
 
-            # 🌟 呼叫 crawler 裡的抓股價功能
-            buy_price = crawler.get_next_monday_open_price(stock_id, df.at[i, '資料日期'])
-            sell_price = crawler.get_next_friday_close_price(stock_id, df.at[i, '資料日期'])
-
-            # 條件 E: 檢查下週二到下週四收盤價連續走高
-            if buy_price <= 0 or pd.isna(sell_price) or not crawler.check_condition_e_with_yfinance(stock_id, df.at[i, '資料日期'], buy_price):
+            # 🌟 修正條件 E 區塊：如果 skip_cond_e 為 True，就不檢查連漲條件
+            if buy_price <= 0 or pd.isna(sell_price):
                 continue
-            
+                
+            if not skip_cond_e and not crawler.check_condition_e_with_yfinance(stock_id, date_str, buy_price):
+                continue
+                
             if buy_price > 0 and not pd.isna(sell_price):
                 profit_pct = ((sell_price - buy_price) / buy_price) * 100
+                
+                # ==========================================
+                # 🌟 新增：提取 FinMind 外部籌碼特徵
+                # ==========================================
+                # 計算外資淨買賣超 (買進 - 賣出)，並加入防呆處理確認欄位存在
+                if 'Foreign_Buy_Sum' in df.columns and 'Foreign_Sell_Sum' in df.columns:
+                    foreign_net_buy = df.at[i, 'Foreign_Buy_Sum'] - df.at[i, 'Foreign_Sell_Sum']
+                else:
+                    foreign_net_buy = 0
+                    
+                margin_bal = df.at[i, 'MarginPurchaseBalance'] if 'MarginPurchaseBalance' in df.columns else 0
+                short_bal = df.at[i, 'ShortSaleBalance'] if 'ShortSaleBalance' in df.columns else 0
+
+                # 🌟 提取機器學習要用的特徵 (包含神秘金字塔與 FinMind 數據)
                 trades.append({
                     '代號': stock_id,
                     '進場日期(籌碼公告)': df.at[i, '資料日期'],
+                    
+                    # --- 機器學習特徵 (X) ---
                     '大戶相關係數': round(float(corr_val), 3),
                     '散戶相關係數': round(float(retail_corr_val), 3),
-                    '平均張數相關': round(float(avg_corr_val), 3),
+                    '均張相關係數': round(float(avg_corr_val), 3),
+                    '大戶四週成長率': round(float(weekly_growth_a[0]), 3), 
+                    '散戶衰退率': round(float(pop_decline_pct), 3),
+                    '外資買賣超': float(foreign_net_buy),  # 新增外部特徵
+                    '融資餘額': float(margin_bal),        # 新增外部特徵
+                    '融券餘額': float(short_bal),         # 新增外部特徵
+                    
+                    # --- 機器學習標籤 (y) ---
                     '週一開盤進場價': round(buy_price, 2),
                     '下週收盤出場價': round(sell_price, 2),
-                    '週報酬%': profit_pct
+                    '週報酬%': profit_pct,
+                    '是否獲利': 1 if profit_pct > 0 else 0  
+                })
+
+                # 🌟 提取純籌碼特徵，加入 ml_dataset
+                ml_dataset.append({
+                    '股票代號': stock_id,
+                    '進場日期': df.at[i, '資料日期'],
+                    
+                    # --- 特徵 (X) ---
+                    '大戶相關係數': round(float(corr_val), 3),
+                    '散戶相關係數': round(float(retail_corr_val), 3),
+                    '均張相關係數': round(float(avg_corr_val), 3),
+                    '大戶四週成長率': round(float(weekly_growth_a[0]), 3), 
+                    '散戶衰退率': round(float(pop_decline_pct), 3),
+                    '外資買賣超': float(foreign_net_buy),  # 新增外部特徵
+                    '融資餘額': float(margin_bal),        # 新增外部特徵
+                    '融券餘額': float(short_bal),         # 新增外部特徵
+                    
+                    # --- 標籤 (y) ---
+                    '是否獲利': 1 if profit_pct > 0 else 0  
                 })
 
     return trades
 
 
-def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, last_week_threshold=2.0, pop_decline_threshold=0.5,
+def has_any_ad_signal(df_group, continuous_weeks=3, min_growth=0.0479, last_week_threshold=0.179, pop_decline_threshold=0.198,
                       corr_window=156, large_corr_thresh=0.6,
-                      retail_corr_thresh=-0.6, avg_corr_thresh=0.6,
-                      use_tej_filters=False, foreign_net_min=0, investment_net_min=0,
-                      margin_change_max=0, short_change_min=0, use_tej_enrichment=False,
-                      use_twse_extra_filters=False, require_foreign_3d=False, require_margin_low=False,
-                      margin_low_lookback_days=60, margin_low_percentile=20):
+                      retail_corr_thresh=-0.6, avg_corr_thresh=0.6, skip_cond_e=False):
     """檢查是否曾出現符合 A~D 的任一訊號，作為是否進入 Yahoo 抓價流程的預篩。"""
     df = df_group.sort_values('資料日期', ascending=True).reset_index(drop=True)
     large_holder_series = _get_large_holder_series(df)
@@ -217,68 +191,104 @@ def has_any_ad_signal(df_group, continuous_weeks=4, min_growth=0.1, last_week_th
         retail_corr_val = 0.0 if pd.isna(retail_corr_val) else retail_corr_val
 
         if corr_val >= large_corr_thresh or avg_corr_val >= avg_corr_thresh or retail_corr_val <= retail_corr_thresh:
-            if _passes_tej_filters(df, i, use_tej_filters=use_tej_filters,
-                                   foreign_net_min=foreign_net_min,
-                                   investment_net_min=investment_net_min,
-                                   margin_change_max=margin_change_max,
-                                   short_change_min=short_change_min):
-                if _passes_twse_extra_filters(
-                    df_group['股票代號'].iloc[0],
-                    df.at[i, '資料日期'],
-                    use_twse_extra_filters=use_twse_extra_filters,
-                    require_foreign_3d=require_foreign_3d,
-                    require_margin_low=require_margin_low,
-                    margin_low_lookback_days=margin_low_lookback_days,
-                    margin_low_percentile=margin_low_percentile,
-                ):
-                    return True
+            return True
 
     return False
 
 
 # ==========================================
-# 回測總司令函式
+# 🌟 回測總司令函式 (支援動態參數與獨立訓練模式)
 # ==========================================
-def run_all_analysis(target_list, **kwargs):
+def run_all_analysis(target_list, params=None, is_training=False):
+    # 若未傳遞參數，給予空字典，讓內部函式使用預設值
+    if params is None:
+        params = {}
+        
     all_dfs = []
     all_trades = []
     total = len(target_list)
-    use_tej_enrichment = kwargs.get("use_tej_enrichment", False)
+    
+    # 每次執行前先清空全域的機器學習特徵庫，避免重複疊加
+    global ml_dataset
+    if is_training:
+        ml_dataset = [] 
 
     for i, sid in enumerate(target_list):
         print(f"[{i + 1}/{total}] {sid}...", end=" ", flush=True)
         
-        # 🌟 呼叫 crawler 抓資料
         df = crawler.get_individual_stock_data(sid)
         if df is None or df.empty:
             print("Skip (無籌碼資料)")
             continue
 
-        if use_tej_enrichment:
-            df = crawler.enrich_with_tej_features(df, sid)
-
-        # 🌟 先下載該股票 3 年價格歷史 (快取 12 小時)
         price_data = crawler.download_stock_price_history(sid)
         if price_data is None or price_data.empty:
             print("Skip (無價格數據)")
             continue
 
-        # 只對曾經觸發 A~D 的股票進行後續 Yahoo 抓價與回測
-        if not has_any_ad_signal(df, **kwargs):
+        # 🌟 動態傳入參數 (預篩選)
+        if not has_any_ad_signal(df, **params):
             print("Skip (未觸發A~D)")
             continue
 
+        df['資料日期'] = pd.to_datetime(df['資料日期'])
+        df = df.sort_values('資料日期') 
+        start_date = df['資料日期'].min().strftime('%Y-%m-%d')
+        end_date = df['資料日期'].max().strftime('%Y-%m-%d')
+        
+        df_finmind = crawler_finmind.fetch_weekly_chip_data(sid, start_date, end_date)
+        
+        if df_finmind is not None and not df_finmind.empty:
+            df_finmind['date'] = pd.to_datetime(df_finmind['date'])
+            df_finmind = df_finmind.sort_values('date')
+            df = pd.merge_asof(
+                df, df_finmind, left_on='資料日期', right_on='date', direction='backward', tolerance=pd.Timedelta(days=3)
+            )
+            
+            if 'MarginPurchaseBalance' in df.columns:
+                df['MarginPurchaseBalance'] = df['MarginPurchaseBalance'].ffill().fillna(0)
+            if 'ShortSaleBalance' in df.columns:
+                df['ShortSaleBalance'] = df['ShortSaleBalance'].ffill().fillna(0)
+            if 'Foreign_Buy_Sum' in df.columns:
+                df['Foreign_Buy_Sum'] = df['Foreign_Buy_Sum'].fillna(0)
+            if 'Foreign_Sell_Sum' in df.columns:
+                df['Foreign_Sell_Sum'] = df['Foreign_Sell_Sum'].fillna(0)
+                
+            print(f"[{sid}] 合併處理後資料筆數: {len(df)}")
+        else:
+            print(f"[{sid}] ⚠️ 查無 FinMind 資料，將略過合併")
+
         all_dfs.append(df)
-        trades = backtest_squeeze_strategy(df, **kwargs)
+        
+        # 🌟 動態傳入參數 (主策略回測)
+        trades = backtest_squeeze_strategy(df, **params)
         all_trades.extend(trades)
 
         print(f"OK ({len(df)}週籌碼, 訊號{len(trades)}筆)")
+
+    # 針對訓練模式特製的防呆清空邏輯 (確保不影響非訓練模式)
+    if not is_training:
+        ml_dataset = []
 
     if all_trades:
         trades_df = pd.DataFrame(all_trades).sort_values(['進場日期(籌碼公告)', '代號'], ascending=[False, True])
         return trades_df
     else:
         return pd.DataFrame()
+    
+# ==========================================
+# 匯出機器學習資料的專屬函式 (給 test.py 呼叫)
+# ==========================================
+def export_ml_data():
+    global ml_dataset # 宣告使用全域變數
+    if ml_dataset:
+        print("\n" + "=" * 90)
+        print("💾 正在匯出機器學習特徵...")
+        ml_df = pd.DataFrame(ml_dataset)
+        ml_df.to_csv("ml_training_data.csv", index=False, encoding="utf-8-sig")
+        print(f"✅ 機器學習訓練資料已匯出至 ml_training_data.csv，共 {len(ml_df)} 筆樣本。")
+    else:
+        print("\n⚠️ 此次執行沒有產生任何可用於 ML 訓練的資料。")
 
 # ==========================================
 # 終端機執行主程式
