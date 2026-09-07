@@ -24,31 +24,72 @@ FEATURE_COLUMNS = [
 ]
 
 # === 🌟 1. 將讀取 TEJ 的函式新增在這裡 ===
-def load_local_tej_data(stock_id, base_dir=r"C:\Users\chank\Downloads\tej_data\tej_data"):
-    """使用 glob 模糊搜尋股票代號開頭的 TEJ 檔案並讀取"""
-    # 尋找類似 "8291 *.csv" 的檔案
+def load_local_tej_data(stock_id, base_dir=r"C:\Users\User\Downloads\final-project(904)\tej_data"):
+    """讀取 TEJ 並轉換成回測使用的籌碼欄位。"""
     search_pattern = os.path.join(base_dir, f"{stock_id}*.csv")
     file_list = glob.glob(search_pattern)
     
     if not file_list:
         return None
         
-    filepath = file_list[0] # 取找到的第一個檔案
+    filepath = file_list[0]
     
     try:
         df_tej = pd.read_csv(filepath)
         if df_tej.empty:
             return None
             
-        df_tej['年月日'] = pd.to_datetime(df_tej['年月日'])
-        df_tej = df_tej.sort_values('年月日')
-        
-        # 挑選並重新命名欄位 (避開原始資料欄位的空白字元問題)
-        df_tej = df_tej[['年月日', '1000張以上  (比率)', '1 -5  張(比率)']].rename(columns={
-            '1000張以上  (比率)': 'TEJ_大戶持股比',
-            '1 -5  張(比率)': 'TEJ_散戶持股比'
-        })
-        return df_tej
+        required_columns = [
+            '年月日',
+            '集保總張數(千股)',
+            '400-600 張(比率)',
+            '600-800 張(比率)',
+            '800-1000張(比率)',
+            '1000張以上  (比率)',
+            '集保總人數',
+            '1 -5  張(比率)'
+        ]
+        missing_columns = [
+            column for column in required_columns if column not in df_tej.columns
+        ]
+        if missing_columns:
+            print(f"TEJ 欄位缺少: {missing_columns}")
+            return None
+
+        df_tej['年月日'] = pd.to_datetime(
+            df_tej['年月日'], errors='coerce'
+        )
+        numeric_columns = required_columns[1:]
+        for column in numeric_columns:
+            df_tej[column] = pd.to_numeric(
+                df_tej[column], errors='coerce'
+            ).fillna(0)
+
+        df_tej['>400張百分比'] = df_tej[
+            [
+                '400-600 張(比率)',
+                '600-800 張(比率)',
+                '800-1000張(比率)',
+                '1000張以上  (比率)'
+            ]
+        ].sum(axis=1)
+        df_tej['>1000張百分比'] = df_tej['1000張以上  (比率)']
+        df_tej['總股東人數'] = df_tej['集保總人數']
+        df_tej['總張數'] = df_tej['集保總張數(千股)']
+        df_tej['TEJ_大戶持股比'] = df_tej['1000張以上  (比率)']
+        df_tej['TEJ_散戶持股比'] = df_tej['1 -5  張(比率)']
+
+        return df_tej[
+            [
+                '年月日',
+                '>400張百分比',
+                '>1000張百分比',
+                '總股東人數',
+                '總張數',
+                'TEJ_大戶持股比',
+                'TEJ_散戶持股比'
+            ]
+        ].dropna(subset=['年月日']).sort_values('年月日')
     except Exception as e:
         print(f"TEJ 資料讀取錯誤: {e}")
         return None
@@ -59,6 +100,46 @@ def _safe_divide(numerator, denominator):
     if denominator == 0:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _prepend_tej_history(df, df_tej, price_data, stock_id):
+    """用 TEJ 起始日到快取起始日前的資料補建回測週資料。"""
+    if df.empty or df_tej.empty or price_data is None or price_data.empty:
+        return df
+
+    data_start = df['資料日期'].min()
+    tej_history = df_tej[df_tej['年月日'] < data_start].copy()
+    if tej_history.empty:
+        return df
+
+    prices = price_data.sort_index().copy()
+    closes = pd.to_numeric(prices['Close'], errors='coerce').dropna()
+    if closes.empty:
+        return df
+
+    tej_history['收盤價'] = [
+        closes.loc[closes.index <= date].iloc[-1]
+        if not closes.loc[closes.index <= date].empty else np.nan
+        for date in tej_history['年月日']
+    ]
+    tej_history = tej_history.dropna(subset=['收盤價'])
+    if tej_history.empty:
+        return df
+
+    tej_history['股票代號'] = str(stock_id).zfill(4)
+    tej_history['資料日期'] = tej_history['年月日']
+    total_people = pd.to_numeric(tej_history['總股東人數'], errors='coerce')
+    total_shares = pd.to_numeric(tej_history['總張數'], errors='coerce')
+    tej_history['平均張數/人'] = np.where(
+        total_people > 0,
+        total_shares / total_people,
+        0.0
+    )
+    tej_history = tej_history.drop(columns=['年月日'])
+
+    return pd.concat([tej_history, df], ignore_index=True, sort=False).sort_values(
+        '資料日期'
+    ).reset_index(drop=True)
 
 
 def _signed_log1p(value):
@@ -221,6 +302,7 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, l
                 sample_date = sample_date.strftime('%Y-%m-%d')
             sample_buy_price = crawler.get_next_monday_open_price(stock_id, sample_date)
             sample_return = compute_future_return_pct(stock_id, sample_date, sample_buy_price, weeks=4)
+            sample_return_1w = compute_future_return_pct(stock_id, sample_date, sample_buy_price, weeks=1)
             if pd.isna(sample_return):
                 continue
 
@@ -230,6 +312,7 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, l
                 '進場日期': df.at[sample_idx, '資料日期'],
                 **sample_features,
                 '未來4週報酬%': round(float(sample_return), 6),
+                '未來1週報酬%': round(float(sample_return_1w), 6),  # 🌟 寫入 1 週報酬率
                 '是否獲利': 1 if sample_return > 0 else 0
             })
     
@@ -305,16 +388,23 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, l
 
                 feature_dict = compute_ml_features(stock_id, df, i)
                 future_4w_return = compute_future_return_pct(stock_id, date_str, buy_price, weeks=4)
+                # 🌟 新增：計算未來 1 週報酬率
+                future_1w_return = compute_future_return_pct(stock_id, date_str, buy_price, weeks=1)
 
                 # 🌟 提取機器學習要用的特徵 (改成更具市場意義的 8 個特徵)
                 trades.append({
                     '代號': stock_id,
                     '進場日期(籌碼公告)': df.at[i, '資料日期'],
+                    '>1000張%(金字塔)': df.at[i, '>1000張百分比'] if '>1000張百分比' in df.columns else 0,
+                    '>400張%(金字塔)': df.at[i, '>400張百分比'] if '>400張百分比' in df.columns else 0,
+                    '總股東人數(金字塔)': df.at[i, '總股東人數'] if '總股東人數' in df.columns else 0,
+                    '平均張數/人(金字塔)': df.at[i, '平均張數/人'] if '平均張數/人' in df.columns else 0,
                     **feature_dict,
                     '週一開盤進場價': round(buy_price, 2),
                     '下週收盤出場價': round(sell_price, 2),
                     '週報酬%': profit_pct,
                     '未來4週報酬%': round(float(future_4w_return), 6),
+                    '未來1週報酬%': round(float(future_1w_return), 6),  # 🌟 寫入 1 週報酬率
                     '是否獲利': 1 if future_4w_return > 0 else 0
                 })
 
@@ -322,8 +412,13 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, l
                     ml_dataset.append({
                         '股票代號': stock_id,
                         '進場日期': df.at[i, '資料日期'],
+                        '>1000張%(金字塔)': df.at[i, '>1000張百分比'] if '>1000張百分比' in df.columns else 0,
+                        '>400張%(金字塔)': df.at[i, '>400張百分比'] if '>400張百分比' in df.columns else 0,
+                        '總股東人數(金字塔)': df.at[i, '總股東人數'] if '總股東人數' in df.columns else 0,
+                        '平均張數/人(金字塔)': df.at[i, '平均張數/人'] if '平均張數/人' in df.columns else 0,
                         **feature_dict,
                         '未來4週報酬%': round(float(future_4w_return), 6),
+                        '未來1週報酬%': round(float(future_1w_return), 6),  # 🌟 寫入 1 週報酬率
                         '是否獲利': 1 if future_4w_return > 0 else 0
                     })
 
@@ -398,18 +493,60 @@ def run_all_analysis(target_list, params=None, is_training=False):
             print("Skip (無籌碼資料)")
             continue
 
-        price_data = crawler.download_stock_price_history(sid)
+        df['資料日期'] = pd.to_datetime(df['資料日期'])
+        df = df.sort_values('資料日期') 
+
+        # 先取得 TEJ 起始日，讓價格與回測資料能涵蓋同一段歷史。
+        df_tej = load_local_tej_data(sid)
+        if df_tej is None or df_tej.empty:
+            print("Skip (無 TEJ 資料)")
+            continue
+
+        tej_start_date = df_tej['年月日'].min().strftime('%Y-%m-%d')
+        price_data = crawler.download_stock_price_history(
+            sid, start_date=tej_start_date
+        )
         if price_data is None or price_data.empty:
             print("Skip (無價格數據)")
             continue
 
-        # 🌟 動態傳入參數 (預篩選)
+        # 用 TEJ 補建 crawler 快取尚未涵蓋的早期週資料。
+        df = _prepend_tej_history(df, df_tej, price_data, sid)
+
+        df = df.drop(
+            columns=[
+                '>400張百分比',
+                '>1000張百分比',
+                '總股東人數',
+                '總張數',
+                'TEJ_大戶持股比',
+                'TEJ_散戶持股比'
+            ],
+            errors='ignore'
+        )
+        df = pd.merge_asof(
+            df,
+            df_tej,
+            left_on='資料日期',
+            right_on='年月日',
+            direction='backward',
+            tolerance=pd.Timedelta(days=3)
+        )
+        for column in [
+            '>400張百分比',
+            '>1000張百分比',
+            '總股東人數',
+            'TEJ_大戶持股比',
+            'TEJ_散戶持股比'
+        ]:
+            df[column] = pd.to_numeric(
+                df[column], errors='coerce'
+            ).ffill().fillna(0)
+
         if not has_any_ad_signal(df, **params):
             print("Skip (未觸發A~D)")
             continue
 
-        df['資料日期'] = pd.to_datetime(df['資料日期'])
-        df = df.sort_values('資料日期') 
         start_date = df['資料日期'].min().strftime('%Y-%m-%d')
         end_date = df['資料日期'].max().strftime('%Y-%m-%d')
         
@@ -434,23 +571,6 @@ def run_all_analysis(target_list, params=None, is_training=False):
             print(f"[{sid}] 合併處理後資料筆數: {len(df)}")
         else:
             print(f"[{sid}] ⚠️ 查無 FinMind 資料，將略過合併")
-
-        # === 🌟 3. 新增 TEJ 資料合併邏輯 ===
-        df_tej = load_local_tej_data(sid)
-        if df_tej is not None and not df_tej.empty:
-            df_tej['年月日'] = pd.to_datetime(df_tej['年月日'])
-            df = pd.merge_asof(
-                df, df_tej, 
-                left_on='資料日期', right_on='年月日', 
-                direction='backward', tolerance=pd.Timedelta(days=3)
-            )
-            df['TEJ_大戶持股比'] = df['TEJ_大戶持股比'].ffill().fillna(0)
-            df['TEJ_散戶持股比'] = df['TEJ_散戶持股比'].ffill().fillna(0)
-        else:
-            # 防呆：如果本地資料夾沒這個股票，補上 0 避免報錯
-            df['TEJ_大戶持股比'] = 0.0
-            df['TEJ_散戶持股比'] = 0.0
-        # ================================
 
         all_dfs.append(df)
         

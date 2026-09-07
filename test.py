@@ -116,7 +116,7 @@ def main():
             
             completed_trades = trades_df.dropna(subset=['週報酬%'])
             if not completed_trades.empty:
-                win_rate = (completed_trades['週報酬%'] > 0).mean() * 1003
+                win_rate = (completed_trades['週報酬%'] > 0).mean() * 100
                 avg_return = completed_trades['週報酬%'].mean()
                 print(f"\n【總體績效統計】")
                 print(f"勝率: {win_rate:.2f}% | 平均週報酬: {avg_return:.2f}% | 訊號總數: {len(completed_trades)} (已結算)")

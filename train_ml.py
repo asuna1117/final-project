@@ -14,10 +14,13 @@ FEATURE_COLS = [
     '20日均線偏離率',
     '成交量增幅',
     '外資淨買賣超/成交量',
-    '融資融券比率'
+    '融資融券比率',
+    '大戶持股比(TEJ)',  # 🌟 新增 TEJ 特徵
+    '散戶持股比(TEJ)', # 🌟 新增 TEJ 特徵
+    '大戶散戶差'
 ]
 SEQUENCE_LENGTH = 5
-TARGET_COL = '未來4週報酬%'
+TARGET_COL = '未來1週報酬%'
 
 
 def build_sequences(df):
@@ -58,7 +61,16 @@ def main():
     print("讀取訓練資料...")
     df = pd.read_csv(data_path)
     target_column = TARGET_COL if TARGET_COL in df.columns else '是否獲利'
+
+    
+    # 特徵合成：直接計算大戶與散戶的持股差距
+    df['大戶散戶差'] = df['大戶持股比(TEJ)'] - df['散戶持股比(TEJ)']
+
     df = df.dropna(subset=FEATURE_COLS + [target_column]).copy()
+
+    # 限制未來4週報酬率的極端值 (例如最多漲 40%，最多跌 -30%)
+    df[TARGET_COL] = df[TARGET_COL].clip(lower=-15, upper=15)
+
 
     if len(df) < 50:
         print("⚠️ 警告：有效樣本數少於 50 筆，模型可能無法有效學習。")
@@ -92,17 +104,15 @@ def main():
     print(f"⏳ 正在使用 LSTM 進行『未來 4 週報酬率』回歸預測，序列長度={SEQUENCE_LENGTH}, 樣本數={len(X)}...")
     model = keras.Sequential([
         keras.Input(shape=(SEQUENCE_LENGTH, len(FEATURE_COLS))),
-        layers.LSTM(32, return_sequences=True),
-        layers.Dropout(0.2),
-        layers.LSTM(16, return_sequences=False),
-        layers.Dense(16, activation='relu'),
-        layers.Dropout(0.2),
+        layers.LSTM(16, return_sequences=False), # 🌟 拔掉一層 LSTM，神經元砍半
+        layers.Dropout(0.3),                     # 🌟 提高遺忘率，強迫它不要死背
+        layers.Dense(8, activation='relu'),      # 🌟 減少 Dense 複雜度
         layers.Dense(1, activation='linear')
     ])
 
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.0005),
-        loss=keras.losses.Huber(),
+        loss='mae',
         metrics=['mae']
     )
 
@@ -111,7 +121,7 @@ def main():
         y_train_scaled,
         validation_split=0.1,
         epochs=100,
-        batch_size=16,
+        batch_size=256,
         verbose=1,
         callbacks=[
             keras.callbacks.ReduceLROnPlateau(
@@ -141,8 +151,8 @@ def main():
     print(f"均方根誤差 (RMSE): {rmse:.3f}%")
     print(f"Baseline MAE: {baseline_mae:.3f}%")
     print(f"Baseline RMSE: {baseline_rmse:.3f}%")
-    print(f"實際平均 4 週報酬: {np.mean(y_test):+.3f}%")
-    print(f"預測平均 4 週報酬: {np.mean(y_pred):+.3f}%")
+    print(f"實際平均 1 週報酬: {np.mean(y_test):+.3f}%")
+    print(f"預測平均 1 週報酬: {np.mean(y_pred):+.3f}%")
     if mae < baseline_mae and rmse < baseline_rmse:
         print("模型表現：優於 Baseline")
     else:

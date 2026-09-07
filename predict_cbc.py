@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import crawler  
 import crawler_finmind # 🌟 新增：引入 FinMind 爬蟲
+import backtest
 from tabulate import tabulate
 import re
 import unicodedata
@@ -13,7 +14,8 @@ SEQUENCE_LENGTH = 5
 FEATURE_COLS = [
     '1週報酬率', '4週報酬率', '8週報酬率',
     '5日均線偏離率', '20日均線偏離率', '成交量增幅',
-    '外資淨買賣超/成交量', '融資融券比率'
+    '外資淨買賣超/成交量', '融資融券比率','大戶持股比(TEJ)',
+    '散戶持股比(TEJ)','大戶散戶差'
 ]
 
 # ==========================================
@@ -29,11 +31,9 @@ try:
         target_scale = float(scaler_data['target_scale'])
     ml_model = keras.Sequential([
         keras.Input(shape=(SEQUENCE_LENGTH, len(FEATURE_COLS))),
-        layers.LSTM(32, return_sequences=True),
-        layers.Dropout(0.2),
         layers.LSTM(16, return_sequences=False),
-        layers.Dense(16, activation='relu'),
-        layers.Dropout(0.2),
+        layers.Dropout(0.3),
+        layers.Dense(8, activation='relu'),
         layers.Dense(1, activation='linear')
     ])
     ml_model.load_weights(model_filename)
@@ -64,7 +64,7 @@ def _signed_log1p(value):
 
 
 def filter_with_ml(latest_features_dict):
-    """傳入最新一週的特徵字典，回傳 (是否建議進場, 預測未來 4 週報酬%)"""
+    """傳入最新一週的特徵字典，回傳預測結果與報酬率。"""
     if ml_model is None:
         return True, 0.0
 
@@ -172,6 +172,8 @@ def _build_feature_row(stock_id, df, row_idx, price_df):
 
     foreign_to_volume = _signed_log1p(foreign_net / max(latest_volume, 1))
     margin_short_ratio = margin_balance / (abs(margin_balance) + abs(short_balance) + 1.0)
+    tej_large = _get_numeric_value(df, row_idx, ['TEJ_大戶持股比'])
+    tej_retail = _get_numeric_value(df, row_idx, ['TEJ_散戶持股比'])
 
     return {
         '1週報酬率': round(return_pct(1), 6),
@@ -181,14 +183,59 @@ def _build_feature_row(stock_id, df, row_idx, price_df):
         '20日均線偏離率': round(moving_average_deviation(20), 6),
         '成交量增幅': round(volume_change, 6),
         '外資淨買賣超/成交量': round(foreign_to_volume, 6),
-        '融資融券比率': round(margin_short_ratio, 6)
+        '融資融券比率': round(margin_short_ratio, 6),
+        '大戶持股比(TEJ)': round(tej_large, 6),
+        '散戶持股比(TEJ)': round(tej_retail, 6),
+        '大戶散戶差': round(tej_large - tej_retail, 6)
     }
+
+
+def _merge_tej_data(stock_id, df):
+    """將 TEJ 分組欄位合併到預測資料，供條件與 ML 特徵共用。"""
+    df_tej = backtest.load_local_tej_data(stock_id)
+    if df_tej is None or df_tej.empty:
+        return None
+
+    df = df.copy()
+    df['資料日期'] = pd.to_datetime(df['資料日期'])
+    df = df.sort_values('資料日期')
+    df = df.drop(
+        columns=[
+            '>400張百分比',
+            '>1000張百分比',
+            '總股東人數',
+            '總張數',
+            'TEJ_大戶持股比',
+            'TEJ_散戶持股比'
+        ],
+        errors='ignore'
+    )
+    df = pd.merge_asof(
+        df,
+        df_tej,
+        left_on='資料日期',
+        right_on='年月日',
+        direction='backward',
+        tolerance=pd.Timedelta(days=3)
+    )
+    for column in [
+        '>400張百分比',
+        '>1000張百分比',
+        '總股東人數',
+        'TEJ_大戶持股比',
+        'TEJ_散戶持股比'
+    ]:
+        df[column] = pd.to_numeric(df[column], errors='coerce').ffill().fillna(0)
+    return df.reset_index(drop=True)
 
 
 def scan_latest_and_history(df, params): 
     df['資料日期'] = pd.to_datetime(df['資料日期'])
     df = df.sort_values('資料日期').reset_index(drop=True)
     stock_id = df['股票代號'].iloc[0]
+    df = _merge_tej_data(stock_id, df)
+    if df is None or df.empty:
+        return None, None
     i_latest = len(df) - 1
     
     # 1. 嚴格初篩：先用 GA 參數檢查最新一週

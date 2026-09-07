@@ -34,8 +34,8 @@ def _quiet_yf_download(*args, **kwargs):
 # ==========================================
 # 股價與爬蟲輔助功能
 # ==========================================
-def download_stock_price_history(stock_id, force_update=False):
-    """下載單一股票 3 年歷史價格數據並存成 CSV (快取 12 小時)"""
+def download_stock_price_history(stock_id, force_update=False, start_date=None):
+    """下載股票歷史價格；指定 start_date 時確保快取涵蓋該日期。"""
     price_file = os.path.join(DATA_DIR, f"{stock_id}_price_history.csv")
     
     # 檢查快取是否有效
@@ -44,14 +44,22 @@ def download_stock_price_history(stock_id, force_update=False):
         if file_age <= 43200 and not force_update:
             try:
                 df = pd.read_csv(price_file, index_col='Date', parse_dates=True)
-                if not df.empty:
+                cache_start = pd.to_datetime(df.index.min())
+                requested_start = pd.to_datetime(start_date) if start_date else None
+                if not df.empty and (
+                    requested_start is None or cache_start <= requested_start
+                ):
                     return df
             except:
                 pass
     
-    # 計算 3 年前的日期
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365*3)
+    requested_start = pd.to_datetime(start_date) if start_date else None
+    default_start = end_date - timedelta(days=365 * 3)
+    download_start = min(
+        default_start,
+        requested_start.to_pydatetime() if requested_start is not None else default_start
+    )
     
     # 嘗試兩種股票代碼後綴
     for suffix in [".TW", ".TWO"]:
@@ -60,7 +68,7 @@ def download_stock_price_history(stock_id, force_update=False):
             print(f"  ↓ 下載 {ticker} 價格歷史...", end=" ", flush=True)
             data = _quiet_yf_download(
                 ticker,
-                start=start_date.strftime("%Y-%m-%d"),
+                start=download_start.strftime("%Y-%m-%d"),
                 end=end_date.strftime("%Y-%m-%d"),
                 interval="1d",
                 progress=False,
@@ -252,7 +260,7 @@ def get_individual_stock_data(stock_id, force_update=False):
                 try:
                     row = {
                         '資料日期': numbers[0], '總張數' : numbers[1], '總股東人數': numbers[2], 
-                        '平均張數/人': numbers[3], '>1000張百分比': numbers[4], '>400張百分比': numbers[5], '收盤價': numbers[12]
+                        '平均張數/人': numbers[3], '>1000張百分比': numbers[11], '>400張百分比': numbers[5], '收盤價': numbers[12]
                     }
                     if 0 < float(row['收盤價']) < 100000: data_rows.append(row)
                 except: continue

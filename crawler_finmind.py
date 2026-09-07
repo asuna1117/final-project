@@ -44,6 +44,7 @@ def fetch_weekly_chip_data(stock_id, start_date, end_date):
     """
     file_path = os.path.join(DATA_DIR, f"{stock_id}_finmind_daily.csv")
     dl = DataLoader()
+    dl.login_by_token(api_token="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoid2lsbHk3OTIyNzc5QGdtYWlsLmNvbSIsImVtYWlsIjoid2lsbHk3OTIyNzc5QGdtYWlsLmNvbSIsInRva2VuX3ZlcnNpb24iOjB9.Xp0iXIyl4RxHFIZ1PshzSNmVicFMm1sUm2ecc_ZYfzw")
     
     fetch_start_date = pd.to_datetime(start_date)
     target_end_date = pd.to_datetime(end_date)
