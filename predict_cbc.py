@@ -92,13 +92,13 @@ def check_conditions(df, i, continuous_weeks=3, min_growth=0.0479, pop_decline_t
                      corr_window=156, large_corr_thresh=0.6, retail_corr_thresh=-0.6, avg_corr_thresh=0.6, 
                      last_week_threshold=0.179, skip_cond_e=False):
                      
-    large_holder_col = '>400張百分比'
-    if '>400張百分比' not in df.columns:
+    large_holder_series = backtest._get_large_holder_series(df)
+    if large_holder_series.empty:
         return False, 0, 0, 0, 0
         
     if i < continuous_weeks: return False, 0, 0, 0, 0
 
-    weekly_growth_a = [((df.at[i-j, large_holder_col] - df.at[i-j-1, large_holder_col]) / df.at[i-j-1, large_holder_col]) * 100 if df.at[i-j-1, large_holder_col] > 0 else -np.inf for j in range(continuous_weeks)]
+    weekly_growth_a = [((large_holder_series.iat[i-j] - large_holder_series.iat[i-j-1]) / large_holder_series.iat[i-j-1]) * 100 if large_holder_series.iat[i-j-1] > 0 else -np.inf for j in range(continuous_weeks)]
     if not (all(g > 0 for g in weekly_growth_a) and (weekly_growth_a[0] > last_week_threshold)): 
         return False, 0, 0, 0, 0
 
@@ -111,14 +111,19 @@ def check_conditions(df, i, continuous_weeks=3, min_growth=0.0479, pop_decline_t
         return False, 0, 0, 0, 0
 
     actual_window = min(corr_window, i + 1)
-    x_large = df.loc[i-actual_window+1:i, large_holder_col].reset_index(drop=True)
+    x_large = large_holder_series.iloc[i-actual_window:i].reset_index(drop=True)
     x_avg_per_person = df.loc[i-actual_window+1:i, '平均張數/人'].reset_index(drop=True)
     x_shareholders = df.loc[i-actual_window+1:i, '總股東人數'].reset_index(drop=True)
-    y_close = df.loc[i-actual_window+1:i, '收盤價'].reset_index(drop=True) 
+    close_prices = pd.to_numeric(df['收盤價'], errors='coerce')
+    y_next_return = (
+        close_prices.iloc[i-actual_window+1:i+1].to_numpy()
+        / close_prices.iloc[i-actual_window:i].to_numpy()
+        - 1
+    ) * 100
 
-    corr_val = x_large.corr(y_close)
-    avg_corr_val = x_avg_per_person.corr(y_close)
-    retail_corr_val = x_shareholders.corr(y_close)
+    corr_val = x_large.corr(pd.Series(y_next_return))
+    avg_corr_val = x_avg_per_person.corr(pd.Series(y_next_return))
+    retail_corr_val = x_shareholders.corr(pd.Series(y_next_return))
 
     corr_val = 0.0 if pd.isna(corr_val) else corr_val
     avg_corr_val = 0.0 if pd.isna(avg_corr_val) else avg_corr_val

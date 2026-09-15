@@ -331,7 +331,7 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, l
 
         if is_continuous_buy and is_avg_per_person_continuous_up and pop_decline_pct > pop_decline_threshold:
 
-            # 計算進場日前全部週次特徵與下一週收盤價的相關係數
+            # 計算進場日前全部週次特徵與下一週報酬率的相關係數。
             # 使用配對 (X_t, Y_{t+1})，僅用到進場公告日前資料。
             if i < 1:
                 continue
@@ -339,11 +339,16 @@ def backtest_squeeze_strategy(df_group, continuous_weeks=3, min_growth=0.0479, l
             x_large = large_holder_series.iloc[0:i].reset_index(drop=True)
             x_avg_per_person = df.loc[0:i-1, '平均張數/人'].reset_index(drop=True)
             x_shareholders = df.loc[0:i-1, '總股東人數'].reset_index(drop=True)
-            y_next_close = df.loc[1:i, '收盤價'].reset_index(drop=True)
+            close_prices = pd.to_numeric(df['收盤價'], errors='coerce')
+            y_next_return = (
+                close_prices.iloc[1:i + 1].to_numpy()
+                / close_prices.iloc[0:i].to_numpy()
+                - 1
+            ) * 100
 
-            corr_val = x_large.corr(y_next_close)
-            avg_corr_val = x_avg_per_person.corr(y_next_close)
-            retail_corr_val = x_shareholders.corr(y_next_close)
+            corr_val = x_large.corr(pd.Series(y_next_return))
+            avg_corr_val = x_avg_per_person.corr(pd.Series(y_next_return))
+            retail_corr_val = x_shareholders.corr(pd.Series(y_next_return))
 
             corr_val = 0.0 if pd.isna(corr_val) else corr_val
             avg_corr_val = 0.0 if pd.isna(avg_corr_val) else avg_corr_val
@@ -452,11 +457,16 @@ def has_any_ad_signal(df_group, continuous_weeks=3, min_growth=0.0479, last_week
         x_large = large_holder_series.iloc[0:i].reset_index(drop=True)
         x_avg_per_person = df.loc[0:i-1, '平均張數/人'].reset_index(drop=True)
         x_shareholders = df.loc[0:i-1, '總股東人數'].reset_index(drop=True)
-        y_next_close = df.loc[1:i, '收盤價'].reset_index(drop=True)
+        close_prices = pd.to_numeric(df['收盤價'], errors='coerce')
+        y_next_return = (
+            close_prices.iloc[1:i + 1].to_numpy()
+            / close_prices.iloc[0:i].to_numpy()
+            - 1
+        ) * 100
 
-        corr_val = x_large.corr(y_next_close)
-        avg_corr_val = x_avg_per_person.corr(y_next_close)
-        retail_corr_val = x_shareholders.corr(y_next_close)
+        corr_val = x_large.corr(pd.Series(y_next_return))
+        avg_corr_val = x_avg_per_person.corr(pd.Series(y_next_return))
+        retail_corr_val = x_shareholders.corr(pd.Series(y_next_return))
 
         corr_val = 0.0 if pd.isna(corr_val) else corr_val
         avg_corr_val = 0.0 if pd.isna(avg_corr_val) else avg_corr_val
