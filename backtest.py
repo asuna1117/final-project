@@ -24,7 +24,7 @@ FEATURE_COLUMNS = [
 ]
 
 # === 🌟 1. 將讀取 TEJ 的函式新增在這裡 ===
-def load_local_tej_data(stock_id, base_dir=r"C:\Users\User\Downloads\final-project(904)\tej_data"):
+def load_local_tej_data(stock_id, base_dir=r"C:\Users\DQ\Desktop\proj\final-project(919)\tej_data"):
     """讀取 TEJ 並轉換成回測使用的籌碼欄位。"""
     search_pattern = os.path.join(base_dir, f"{stock_id}*.csv")
     file_list = glob.glob(search_pattern)
