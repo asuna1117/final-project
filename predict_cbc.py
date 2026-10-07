@@ -9,13 +9,14 @@ import unicodedata
 from pathlib import Path
 from tensorflow import keras
 from tensorflow.keras import layers
+from xgboost import XGBRegressor
 
 SEQUENCE_LENGTH = 5
 FEATURE_COLS = [
     '1週報酬率', '4週報酬率', '8週報酬率',
     '5日均線偏離率', '20日均線偏離率', '成交量增幅',
     '外資淨買賣超/成交量', '融資融券比率','大戶持股比(TEJ)',
-    '散戶持股比(TEJ)','大戶散戶差'
+    '散戶持股比(TEJ)','大戶散戶差', '短中期動能差', '短長均線差'
 ]
 
 # ==========================================
@@ -23,10 +24,19 @@ FEATURE_COLS = [
 # ==========================================
 model_filename = Path(__file__).resolve().parent / 'lstm_trading_model.keras'
 scaler_filename = Path(__file__).resolve().parent / 'lstm_feature_scaler.npz'
+xgb_model_filename = Path(__file__).resolve().parent / 'xgb_return_model.json'
+ml_encoder = None
+xgb_model = None
+
+
+def _inverse_return(value):
+    return float(np.sign(value) * np.expm1(abs(value)))
 try:
     with np.load(scaler_filename) as scaler_data:
         feature_mean = scaler_data['mean']
         feature_scale = scaler_data['scale']
+        feature_lower = scaler_data['lower'] if 'lower' in scaler_data.files else np.full(len(FEATURE_COLS), -np.inf)
+        feature_upper = scaler_data['upper'] if 'upper' in scaler_data.files else np.full(len(FEATURE_COLS), np.inf)
         target_mean = float(scaler_data['target_mean'])
         target_scale = float(scaler_data['target_scale'])
     ml_model = keras.Sequential([
@@ -37,6 +47,7 @@ try:
         layers.Dense(1, activation='linear')
     ])
     ml_model.load_weights(model_filename)
+    ml_encoder = keras.Model(inputs=ml_model.inputs[0], outputs=ml_model.layers[-2].output)
     print(f"✅ 成功載入機器學習大腦：{model_filename}")
 except (FileNotFoundError, OSError, ValueError, KeyError):
     ml_model = None
@@ -45,6 +56,14 @@ except (FileNotFoundError, OSError, ValueError, KeyError):
     target_mean = 0.0
     target_scale = 1.0
     print(f"⚠️ 找不到模型或標準化參數，將跳過 ML 濾網功能。")
+
+try:
+    if xgb_model_filename.exists():
+        xgb_model = XGBRegressor()
+        xgb_model.load_model(str(xgb_model_filename))
+        print(f"✅ 成功載入 XGBoost 報酬率模型：{xgb_model_filename}")
+except (FileNotFoundError, OSError, ValueError):
+    xgb_model = None
 
 
 def _get_numeric_value(df, row_idx, candidates, default=0.0):
@@ -77,11 +96,16 @@ def filter_with_ml(latest_features_dict):
     if len(seq_values) < SEQUENCE_LENGTH:
         return False, 0.0
     seq_values = seq_values[-SEQUENCE_LENGTH:]
+    seq_values = np.clip(seq_values, feature_lower, feature_upper)
     seq_values = (seq_values - feature_mean) / feature_scale
     X_new = seq_values.reshape(1, SEQUENCE_LENGTH, len(FEATURE_COLS))
 
-    pred_return_scaled = float(ml_model.predict(X_new, verbose=0)[0][0])
-    pred_return = pred_return_scaled * target_scale + target_mean
+    if xgb_model is not None and ml_encoder is not None:
+        latent_features = ml_encoder.predict(X_new, verbose=0)
+        pred_return = _inverse_return(float(xgb_model.predict(latent_features)[0]))
+    else:
+        pred_return_scaled = float(ml_model.predict(X_new, verbose=0)[0][0])
+        pred_return = _inverse_return(pred_return_scaled * target_scale + target_mean)
     prediction = (pred_return >= 0.0)
     return prediction, pred_return
 
@@ -191,7 +215,9 @@ def _build_feature_row(stock_id, df, row_idx, price_df):
         '融資融券比率': round(margin_short_ratio, 6),
         '大戶持股比(TEJ)': round(tej_large, 6),
         '散戶持股比(TEJ)': round(tej_retail, 6),
-        '大戶散戶差': round(tej_large - tej_retail, 6)
+        '大戶散戶差': round(tej_large - tej_retail, 6),
+        '短中期動能差': round(return_pct(1) - return_pct(4) / 4.0, 6),
+        '短長均線差': round(moving_average_deviation(5) - moving_average_deviation(20), 6)
     }
 
 
@@ -342,7 +368,8 @@ def scan_latest_and_history(df, params):
         f'散戶({actual_win}週)': round(float(retail_corr), 3),
         f'均張({actual_win}週)': round(float(avg_corr), 3),
         '收盤價': df.at[i_latest, '收盤價'],
-        'ML預測': f"{'✅' if ml_pass else '❌'} ({ml_prob:+.1f}%)",
+        # 'ML預測': f"{'✅' if ml_pass else '❌'} ({ml_prob:+.1f}%)",
+        'ML預測': f"{'✅' if ml_pass else '❌'} (預測報酬 {ml_prob:+.2f}%)",
         '相似型態勝率': hist_summary,
         '歷史走勢明細': hist_details_str, 
         '建議': suggestion

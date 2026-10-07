@@ -20,7 +20,8 @@ headers = {
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "stock_data_cache")      
+DATA_DIR = os.path.join(BASE_DIR, "stock_data_cache")     
+_memory_price_cache = {} 
 
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
@@ -34,8 +35,77 @@ def _quiet_yf_download(*args, **kwargs):
 # ==========================================
 # 股價與爬蟲輔助功能
 # ==========================================
+# def download_stock_price_history(stock_id, force_update=False, start_date=None):
+#     """下載股票歷史價格；指定 start_date 時確保快取涵蓋該日期。"""
+#     price_file = os.path.join(DATA_DIR, f"{stock_id}_price_history.csv")
+    
+#     # 檢查快取是否有效
+#     if os.path.exists(price_file):
+#         file_age = time.time() - os.path.getmtime(price_file)
+#         if file_age <= 43200 and not force_update:
+#             try:
+#                 df = pd.read_csv(price_file, index_col='Date', parse_dates=True)
+#                 cache_start = pd.to_datetime(df.index.min())
+#                 requested_start = pd.to_datetime(start_date) if start_date else None
+#                 if not df.empty and (
+#                     requested_start is None or cache_start <= requested_start
+#                 ):
+#                     return df
+#             except:
+#                 pass
+    
+#     end_date = datetime.now()
+#     requested_start = pd.to_datetime(start_date) if start_date else None
+#     default_start = end_date - timedelta(days=365 * 3)
+#     download_start = min(
+#         default_start,
+#         requested_start.to_pydatetime() if requested_start is not None else default_start
+#     )
+    
+#     # 嘗試兩種股票代碼後綴
+#     for suffix in [".TW", ".TWO"]:
+#         ticker = f"{stock_id}{suffix}"
+#         try:
+#             print(f"  ↓ 下載 {ticker} 價格歷史...", end=" ", flush=True)
+#             data = _quiet_yf_download(
+#                 ticker,
+#                 start=download_start.strftime("%Y-%m-%d"),
+#                 end=end_date.strftime("%Y-%m-%d"),
+#                 interval="1d",
+#                 progress=False,
+#                 auto_adjust=False,
+#                 threads=False
+#             )
+            
+#             if data is not None and not data.empty:
+#                 if isinstance(data.columns, pd.MultiIndex):
+#                     data.columns = data.columns.get_level_values(0)
+                    
+#                 # 保留必要欄位
+#                 data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+#                 data.index.name = 'Date'
+#                 data.to_csv(price_file, encoding='utf-8-sig')
+#                 print(f"✓ 成功({len(data)}筆)")
+#                 return data
+#         except Exception as e:
+#             print(f"✗ 失敗")
+#             continue
+    
+#     print(f"✗ 無法取得")
+#     return None
+
 def download_stock_price_history(stock_id, force_update=False, start_date=None):
     """下載股票歷史價格；指定 start_date 時確保快取涵蓋該日期。"""
+    global _memory_price_cache
+    
+    # 🌟 1. 攔截請求：如果記憶體已經有這檔股票的資料，直接秒退回，不再讀硬碟
+    if not force_update and stock_id in _memory_price_cache:
+        df = _memory_price_cache[stock_id]
+        cache_start = pd.to_datetime(df.index.min())
+        requested_start = pd.to_datetime(start_date) if start_date else None
+        if not df.empty and (requested_start is None or cache_start <= requested_start):
+            return df
+            
     price_file = os.path.join(DATA_DIR, f"{stock_id}_price_history.csv")
     
     # 檢查快取是否有效
@@ -49,6 +119,7 @@ def download_stock_price_history(stock_id, force_update=False, start_date=None):
                 if not df.empty and (
                     requested_start is None or cache_start <= requested_start
                 ):
+                    _memory_price_cache[stock_id] = df  # 🌟 2. 讀取完硬碟後，存入記憶體
                     return df
             except:
                 pass
@@ -85,6 +156,8 @@ def download_stock_price_history(stock_id, force_update=False, start_date=None):
                 data.index.name = 'Date'
                 data.to_csv(price_file, encoding='utf-8-sig')
                 print(f"✓ 成功({len(data)}筆)")
+                
+                _memory_price_cache[stock_id] = data # 🌟 3. 剛從網路下載完的新資料，也存入記憶體
                 return data
         except Exception as e:
             print(f"✗ 失敗")
