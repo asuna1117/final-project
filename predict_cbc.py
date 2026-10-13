@@ -80,10 +80,19 @@ def filter_with_ml(latest_features_dict):
     seq_values = (seq_values - feature_mean) / feature_scale
     X_new = seq_values.reshape(1, SEQUENCE_LENGTH, len(FEATURE_COLS))
 
-    pred_return_scaled = float(ml_model.predict(X_new, verbose=0)[0][0])
-    pred_return = pred_return_scaled * target_scale + target_mean
-    prediction = (pred_return >= 0.0)
-    return prediction, pred_return
+    # pred_return_scaled = float(ml_model.predict(X_new, verbose=0)[0][0])
+    # pred_return = pred_return_scaled * target_scale + target_mean
+    # prediction = (pred_return >= 0.0)
+    # return prediction, pred_return
+
+    # 模型現在直接輸出勝率 (0~1 之間的浮點數)
+    win_probability = float(ml_model.predict(X_new, verbose=0)[0][0])
+    
+    # 只要模型認為勝率大於 50% (0.5)，就同意放行
+    prediction = (win_probability >= 0.5) 
+    
+    # 乘上 100，轉換成方便閱讀的百分比 (例如 0.65 -> 65.0)
+    return prediction, win_probability * 100
 
 # ==========================================
 # 核心邏輯：判斷某個時間點是否符合進場條件
@@ -342,7 +351,8 @@ def scan_latest_and_history(df, params):
         f'散戶({actual_win}週)': round(float(retail_corr), 3),
         f'均張({actual_win}週)': round(float(avg_corr), 3),
         '收盤價': df.at[i_latest, '收盤價'],
-        'ML預測': f"{'✅' if ml_pass else '❌'} ({ml_prob:+.1f}%)",
+        # 'ML預測': f"{'✅' if ml_pass else '❌'} ({ml_prob:+.1f}%)",
+        'ML預測': f"{'✅' if ml_pass else '❌'} (勝率 {ml_prob:.1f}%)",
         '相似型態勝率': hist_summary,
         '歷史走勢明細': hist_details_str, 
         '建議': suggestion
